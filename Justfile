@@ -49,5 +49,10 @@ survey dir:
     echo
   done
 
+# Validate .goreleaser.yml and build every target locally, without releasing.
+release-check:
+  goreleaser check
+  goreleaser build --snapshot --clean
+
 release:
   goreleaser build --snapshot --clean
