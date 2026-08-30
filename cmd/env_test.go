@@ -116,11 +116,13 @@ func TestMergeIsIdempotent(t *testing.T) {
 	}
 	got := read(t, p)
 	for k := range vars {
-		if n := strings.Count(got, "\n"+k+"="); n != 1 {
-			// count the first line too
-			if !(strings.HasPrefix(got, k+"=") && n == 0) {
-				t.Errorf("%s assigned %d times, want 1:\n%s", k, n, got)
-			}
+		n := strings.Count(got, "\n"+k+"=")
+		// A key on the very first line has no preceding newline to count.
+		if strings.HasPrefix(got, k+"=") {
+			n++
+		}
+		if n != 1 {
+			t.Errorf("%s assigned %d times, want 1:\n%s", k, n, got)
 		}
 	}
 }
