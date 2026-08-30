@@ -1,0 +1,112 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  go-lint-vet:
+    name: go vet + gofmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          # Read the Go version from go.mod so a Renovate bump there cannot
+          # drift from what CI actually builds with.
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: gofmt -l (must be empty)
+        run: |
+          dirty=$(gofmt -l cmd internal main.go)
+          if [ -n "$dirty" ]; then
+            echo "::error::These files are not gofmt-clean:"
+            echo "$dirty"
+            exit 1
+          fi
+
+  golangci-lint:
+    name: golangci-lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9
+        with:
+          version: latest
+
+  go-build:
+    name: go build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: go build
+        run: go build ./...
+
+  go-test:
+    name: go test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      # No services block: these tests are deliberately free of docker and
+      # postgres. Everything that needs a live cluster is exercised by running
+      # dragonrun against a real stack, not from CI.
+      - name: go test
+        run: go test ./... -race
+
+  stack-assets:
+    name: embedded stack assets
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      # The compose file and shell scripts are embedded into the binary with
+      # go:embed, so a syntax error in them compiles perfectly and only fails
+      # later on a developer's machine during `dragonrun init`. Validate them
+      # here instead.
+      - name: docker compose config
+        env:
+          SUPERUSER: ci
+          SUPERUSER_PASSWORD: ci
+          PGBOUNCER_AUTH_PASSWORD: ci
+          DRAGONRUN_HOME: /tmp/dragonrun-ci
+        run: |
+          docker compose \
+            -f internal/stack/assets/docker-compose.yml \
+            --profile dnsmasq \
+            config -q
+
+      - name: shellcheck entrypoints and init scripts
+        run: |
+          shellcheck --severity=warning $(find internal/stack/assets -name '*.sh')

@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"sort"
 	"text/tabwriter"
@@ -11,6 +12,12 @@ import (
 	"git.dragonsecurity.io/dragonrun/internal/provision"
 	"git.dragonsecurity.io/dragonrun/internal/stack"
 )
+
+// row writes one aligned line. Writes to a tabwriter are buffered, so an error
+// here would only ever surface at Flush -- which is where it is checked.
+func row(w io.Writer, format string, args ...any) {
+	_, _ = fmt.Fprintf(w, format, args...)
+}
 
 var showCmd = &cobra.Command{
 	Use:     "show [name]",
@@ -34,21 +41,23 @@ Defaults to the project matching the current directory name.`,
 		vars := Vars(c, p)
 
 		w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-		fmt.Fprintf(w, "%s\t%s\n", p.Name, p.Path)
-		fmt.Fprintln(w)
-		fmt.Fprintf(w, "  site\thttps://%s\t-> host port %d\n", p.Host, p.Upstream)
-		fmt.Fprintf(w, "  mail\thttps://mail.%s\t(or localhost:%d)\n", c.Domain, c.Ports.MailUI)
-		fmt.Fprintf(w, "  pgweb\thttps://pgweb.%s\t(bookmark %q)\n", c.Domain, p.Name)
-		fmt.Fprintln(w)
-		fmt.Fprintf(w, "  role\t%s\n", p.Role)
-		fmt.Fprintf(w, "  password\t%s\n", p.Password)
-		fmt.Fprintf(w, "  control db\t%s\n", p.DB)
+		row(w, "%s\t%s\n", p.Name, p.Path)
+		row(w, "\n")
+		row(w, "  site\thttps://%s\t-> host port %d\n", p.Host, p.Upstream)
+		row(w, "  mail\thttps://mail.%s\t(or localhost:%d)\n", c.Domain, c.Ports.MailUI)
+		row(w, "  pgweb\thttps://pgweb.%s\t(bookmark %q)\n", c.Domain, p.Name)
+		row(w, "\n")
+		row(w, "  role\t%s\n", p.Role)
+		row(w, "  password\t%s\n", p.Password)
+		row(w, "  control db\t%s\n", p.DB)
 		if p.Tenants {
-			fmt.Fprintf(w, "  tenant dbs\t%s*\t(role has CREATEDB)\n", p.TenantPrefix())
+			row(w, "  tenant dbs\t%s*\t(role has CREATEDB)\n", p.TenantPrefix())
 		} else {
-			fmt.Fprintf(w, "  tenant dbs\tno\t(role has NOCREATEDB)\n")
+			row(w, "  tenant dbs\tno\t(role has NOCREATEDB)\n")
 		}
-		w.Flush()
+		if err := w.Flush(); err != nil {
+			return err
+		}
 
 		fmt.Println("\n  environment")
 		keys := make([]string, 0, len(vars))

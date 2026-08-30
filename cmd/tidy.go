@@ -44,7 +44,7 @@ func scanCompose(path string) (composeScan, error) {
 	if err != nil {
 		return out, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	inServices := false
 	seen := map[string]bool{}

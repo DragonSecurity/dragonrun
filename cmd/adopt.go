@@ -115,7 +115,7 @@ func scanHints(dir string) (hints, error) {
 				h.tenants, h.tenantWhy = true, key+" in "+f
 			}
 		}
-		fh.Close()
+		_ = fh.Close()
 	}
 
 	// An env template is the weaker signal; the code is the strong one.
@@ -132,7 +132,7 @@ func scanHints(dir string) (hints, error) {
 	// Record what the old stack was binding, so the report can tell the user
 	// exactly which compose project to stop.
 	if fh, err := os.Open(filepath.Join(dir, "docker-compose.yml")); err == nil {
-		defer fh.Close()
+		defer func() { _ = fh.Close() }()
 		sc := bufio.NewScanner(fh)
 		for sc.Scan() {
 			if m := portRE.FindStringSubmatch(sc.Text()); m != nil {
