@@ -71,3 +71,30 @@ func TestPortsFillKeepsExplicitValues(t *testing.T) {
 		t.Errorf("fill did not supply a missing port: %d", p.Bouncer)
 	}
 }
+
+// Recreating the caddy volume mints a new CA. RecordCA must surface the old
+// one so it can be pruned, rather than leaving trusted-but-useless roots to
+// pile up on every reset.
+func TestRecordCASupersedesOldFingerprints(t *testing.T) {
+	c := &Config{}
+
+	if got := c.RecordCA("AAA"); len(got) != 0 {
+		t.Errorf("first CA reported %v as superseded, want none", got)
+	}
+	if len(c.TrustedCAs) != 1 || c.TrustedCAs[0] != "AAA" {
+		t.Fatalf("TrustedCAs = %v, want [AAA]", c.TrustedCAs)
+	}
+
+	// Re-trusting the same CA is a no-op, so `trust` stays idempotent.
+	if got := c.RecordCA("AAA"); len(got) != 0 {
+		t.Errorf("re-recording the same CA reported %v, want none", got)
+	}
+
+	got := c.RecordCA("BBB")
+	if len(got) != 1 || got[0] != "AAA" {
+		t.Errorf("superseded = %v, want [AAA]", got)
+	}
+	if len(c.TrustedCAs) != 1 || c.TrustedCAs[0] != "BBB" {
+		t.Errorf("TrustedCAs = %v, want only the current [BBB]", c.TrustedCAs)
+	}
+}
