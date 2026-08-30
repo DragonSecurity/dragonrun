@@ -93,7 +93,7 @@ services:
   # created at all, leaving name resolution to AdGuard Home / Pi-hole / router.
   dnsmasq:
     profiles: ["dnsmasq"]
-    image: 4km3/dnsmasq:2.90-r3
+    image: 4km3/dnsmasq:2.90-r3@sha256:52e25fb2601156ab66f6a0872c180b285df7cafaa41267d8d65689f066490641
     container_name: dragonrun-dnsmasq
     restart: unless-stopped
     command: ["-k", "--log-facility=-", "--conf-file=/etc/dnsmasq.conf"]
