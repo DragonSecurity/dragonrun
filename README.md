@@ -1,177 +1,195 @@
 # dragonrun
 
-One shared local dev stack — postgres, pgbouncer, mailpit, pgweb, caddy,
-dnsmasq — plus a CLI that hands each project a generated environment pointing
-at it.
+One shared local development stack — Postgres, PgBouncer, Mailpit, pgweb, Caddy
+— and a CLI that gives every project a hostname instead of a port.
 
-Applications keep running on the host under `mprocs`. dragonrun owns the infra
-and the edge; it never supervises your app.
+```sh
+cd ~/projects/checkout-api
+dragonrun new checkout-api -p 8080
+# → https://checkout-api.test, a database, and a .env pointing at both
+```
 
-## The problem it solves
+Your application keeps running the way it already does, on the host. dragonrun
+owns the infrastructure and the edge, never your processes.
 
-Across ~60 repos here, the per-project `docker-compose.yml` files are near
-identical, and they nearly all bind the *same* host ports:
+## The problem
 
-| binding | repos |
-|---|---|
-| `1025:1025` (mailpit smtp) | 40 |
-| `8025:8025` (mailpit ui) | 39 |
-| `8081:8081` (pgweb) | 31 |
-| `5432:5432` (postgres) | 15 |
+Projects tend to ship a `docker-compose.yml` with a database, a mail catcher and
+a database UI. Every project's copy is near identical, and they all bind the
+same host ports — `5432`, `1025`, `8025`, `8081` — so only one project can run
+at a time.
 
-So only one project can run at a time. The exceptions — `55432`, `56432`,
-`58085`, `1026`, `8026` — are hand-dodges that then froze into `.env.example`
-files and became permanent. It is collision *and* drift from one cause: the
-port is written down in sixty places.
+The usual fix is to bump one project to `55432`, another to `56432`, and write
+those numbers into a `.env.example` where they live forever. Now you have both
+collisions *and* drift, from a single cause: the port is written down in as many
+places as you have projects.
 
-dragonrun removes the port from the conversation. You get a hostname.
+dragonrun runs one stack for all of them and hands each project a generated
+environment. The port stops being something anyone types.
+
+## Requirements
+
+- **macOS.** Wildcard DNS uses `/etc/resolver`, which is macOS-only. Everything
+  else is portable; on Linux you can point a resolver at the bundled dnsmasq or
+  add `/etc/hosts` entries yourself.
+- **Docker** (Docker Desktop, OrbStack, Colima — anything with `docker compose`).
+- **Go 1.27+** to build.
 
 ## Install
 
 ```sh
-go install git.dragonsecurity.io/dragonrun@latest   # the binary
-dragonrun init                                      # this machine
+go install git.dragonsecurity.io/dragonrun@latest
+dragonrun init
 ```
 
-Needs sudo twice: to write `/etc/resolver/test`, and to trust caddy's local CA.
-Nothing else touches the system. Add `--no-dns --no-trust` to skip both.
+`init` prepares the machine: it builds and starts the stack, points `*.test` at
+`127.0.0.1`, and trusts Caddy's local certificate authority so HTTPS works
+without warnings. It asks for `sudo` twice — once to write `/etc/resolver/test`,
+once for the keychain — and touches nothing else.
 
-## Use
+Skip either with `--no-dns` / `--no-trust`.
 
-A **new** project — nothing to copy, no compose file at any point:
+## Quickstart
+
+**A new project.** Nothing to copy in, no compose file at any point:
 
 ```sh
-mkdir ~/projects/newthing && cd ~/projects/newthing
-dragonrun new newthing --tenants -p 8181
+mkdir checkout-api && cd checkout-api
+dragonrun new checkout-api -p 8080
 ```
-
-gives you, with nothing to copy in:
 
 | | |
 |---|---|
-| role | `newthing` |
-| control database | `newthing` |
-| tenant databases | `newthing_*` |
-| site | `https://newthing.test` -> host port 8181 |
+| role | `checkout_api` |
+| database | `checkout_api` |
+| site | `https://checkout-api.test` → host port 8080 |
 | `.env` | written, with working DSNs |
 
-`adopt` differs on one point: it inherits `DB_NAME` from an existing `.env`, so
-an adopted project keeps whatever control database it already had rather than
-being renamed to match the project.
-
-An **existing** project that still has its own stack:
+**An existing project** that already has its own stack:
 
 ```sh
-cd ~/projects/some-api
-dragonrun adopt -w          # infer, register, write .env
-docker compose down         # stop its old stack
-dragonrun tidy --apply      # delete the files it no longer needs
-mprocs                      # app on the host, unchanged
-open https://some-api.test
-```
-
-And to remember where anything is:
-
-```sh
-dragonrun show some-api     # URLs, credentials, DSNs, databases
+cd ~/projects/legacy-api
+dragonrun adopt -w        # infer settings, register, merge into .env
+docker compose down       # stop its old stack
+dragonrun tidy --apply    # delete the files it no longer needs
 ```
 
 `adopt` reads `.env`, `.env.example` and `docker-compose.yml` to work out the
-project name, control database, host port, and whether it provisions tenant
-databases at runtime. `--dry-run` shows its reasoning without changing anything.
+project name, database, host port, and whether it provisions databases at
+runtime. `--dry-run` shows its reasoning and changes nothing.
 
-The old `docker-compose.yml` is left in place. Stop it (`docker compose down`)
-and dragonrun serves the same canonical ports, so unmigrated DSNs still resolve.
+**Find anything again:**
 
-## Multi-tenant
-
-Projects here create tenant databases at runtime. dragonrun expects that.
-
-A project named `saas` owns control database `dragon` and every database under
-`dragon_`. `dragonrun env` emits two DSNs:
-
-```
-DATABASE_URL=postgres://saas:…@localhost:6432/dragon        # pooled, transaction mode
-ADMIN_DATABASE_URL=postgres://saas:…@localhost:5432/postgres  # direct
+```sh
+dragonrun show checkout-api   # URLs, credentials, DSNs, databases
 ```
 
-They differ for measured reasons, not style:
+## How it works
 
-- A bare `CREATE DATABASE` *does* pass through pgbouncer. Inside an explicit
-  transaction it fails — but that is a postgres rule that applies identically to
-  a direct connection, so it is not the reason.
-- Teardown is: pgbouncer holds idle server connections to a tenant database and
-  those block `DROP DATABASE` even after the app disconnects. dragonrun drops
-  `WITH (FORCE)`.
-- Transaction pooling silently breaks session state — advisory locks,
-  `LISTEN`/`NOTIFY`, session GUCs, temp tables. Tenant provisioning and
-  migration code leans on advisory locks.
+```
+             ┌── https://<project>.test ──→ your app, on the host
+Caddy :443 ──┼── https://mail.test ───────→ Mailpit
+             └── https://pgweb.test ──────→ pgweb
 
-Tenant databases created at runtime need **no** pgbouncer configuration:
-`[databases] * = …` routes any name, and `auth_query` resolves credentials from
-postgres, so there is no `userlist.txt` to maintain.
+PgBouncer :6432 ──┐
+                  ├──→ Postgres :5432   one cluster, one database per project
+Postgres  :5432 ──┘
+```
+
+Everything binds `127.0.0.1`. The stack is embedded in the binary and extracted
+to `$DRAGONRUN_HOME` (default `~/.dragonrun`), so there is no repository to
+clone and no compose file to keep in sync.
+
+## Multi-tenant projects
+
+If your application creates databases at runtime — one per tenant — that works
+without any per-tenant configuration.
+
+A project named `saas` owns its control database plus everything under
+`saas_`. `dragonrun env` emits two DSNs:
+
+```sh
+DATABASE_URL=postgres://saas:…@localhost:6432/saas          # pooled
+ADMIN_DATABASE_URL=postgres://saas:…@localhost:5432/postgres # direct
+```
+
+Three things make runtime databases work with no configuration change:
+
+- PgBouncer routes **any** database name through a wildcard, so a database that
+  did not exist a second ago is reachable immediately.
+- Credentials resolve through `auth_query` against Postgres, so there is no
+  `userlist.txt` to maintain.
+- That lookup function is installed into `template1`, so every database created
+  afterwards inherits it — including ones dragonrun never sees.
+
+**Why two DSNs.** Transaction pooling is what makes hundreds of application
+connections cheap, but it breaks session-scoped state — advisory locks,
+`LISTEN`/`NOTIFY`, session settings, temporary tables — and provisioning code
+usually takes an advisory lock to serialise migrations. Teardown matters too:
+PgBouncer holds idle server connections to a database, and those block
+`DROP DATABASE` even after your application disconnects.
+
+A bare `CREATE DATABASE` *does* survive the pooler. That is measured, not
+assumed; it is not the reason for the split.
 
 ## Isolation
 
-One cluster is one blast radius unless something stops it. Two things do:
+One cluster is one blast radius unless something prevents it.
 
-- Control databases get `REVOKE CONNECT … FROM PUBLIC` plus an explicit grant.
-- Tenant databases are created by *your app*, with dragonrun nowhere in the
-  loop, and arrive with `datacl = NULL` — meaning PUBLIC may connect. A
-  database's ACL is **not** copied from its template, so revoking on `template1`
-  does nothing here. A **login event trigger** (PostgreSQL 17+) *is* a
-  per-database object and *is* copied, so it refuses any role that is not the
-  database owner from the instant the database exists.
+Control databases get `REVOKE CONNECT … FROM PUBLIC` plus an explicit grant to
+their owner. Databases your application creates at runtime are the harder case:
+dragonrun is not in the loop, and they arrive with `datacl = NULL`, which means
+`PUBLIC` may connect.
+
+A database's ACL is **not** copied from its template, so revoking on `template1`
+achieves nothing here. A **login event trigger** (PostgreSQL 17+) *is* a
+per-database object and *is* inherited, so it refuses any role that does not own
+the database, from the instant that database exists.
 
 Superusers are exempt, which keeps the cluster recoverable. The `postgres`
 database is deliberately unguarded — it is the shared admin entry point every
 project reaches through `ADMIN_DATABASE_URL`.
 
-Verify it:
-
 ```sh
-dragonrun psql saas            # your own databases: fine
-dragonrun psql autobot dragon  # someone else's: permission denied
+dragonrun psql saas              # your own databases: fine
+dragonrun psql other saas_acme   # someone else's: permission denied
 ```
 
-## Built-in hostnames
+## Hostnames and DNS
 
-The shared services get names too, served by caddy over the same trusted TLS:
+The shared services get names too, over the same trusted TLS:
 
 | | |
 |---|---|
-| `https://mail.test` | mailpit |
-| `https://pgweb.test` | pgweb |
 | `https://<project>.test` | your app |
+| `https://mail.test` | Mailpit |
+| `https://pgweb.test` | pgweb |
 
-These proxy to the containers by service name, not back out through the host's
-published ports — though `localhost:8025` and `localhost:8081` keep working.
+`mail`, `pgweb` and `db` are reserved project names — a project called `mail`
+would emit a duplicate site address, and Caddy refuses those by failing to load,
+taking down the whole edge rather than one site.
 
-`mail`, `pgweb` and `db` are reserved project names: a project called `mail`
-would emit a second `mail.test` block and caddy refuses duplicate addresses,
-taking the whole edge down rather than just that project.
+`.test` is reserved for this purpose by [RFC 6761][rfc6761]. Not `.dev`, which
+is a real TLD and HSTS-preloaded, so plain HTTP breaks; and not `.local`, which
+is mDNS and will fight macOS.
 
-A hostname is fine here because these are **browser** URLs. The database and
-SMTP DSNs stay on `localhost` for the reason in the next section — a browser URL
-failing off-network is an annoyance, an app failing to boot is not.
+[rfc6761]: https://www.rfc-editor.org/rfc/rfc6761#section-6.2
 
-## DNS
-
-Two modes. Pick one — running both is the failure case.
+### Two DNS modes
 
 ```sh
-dragonrun dns              # show current mode and whether it actually resolves
-dragonrun dns external     # you already have AdGuard Home / Pi-hole / a router rewrite
-dragonrun dns dnsmasq      # let dragonrun answer *.test itself (default)
+dragonrun dns              # show current mode, and whether it resolves
+dragonrun dns external     # something on your network already answers *.test
+dragonrun dns dnsmasq      # let dragonrun answer (default)
 ```
 
-`external` removes `/etc/resolver/<domain>` and never starts the bundled
-resolver. That removal is the entire point: **`/etc/resolver` takes precedence
-over the system resolver**, so a leftover file shadows a perfectly good
-network-wide rewrite. The symptom is a resolver that looks configured, a
-container that looks healthy, and names that never resolve.
+Use `external` if you run AdGuard Home, Pi-hole, or a router that rewrites
+`*.test`. It removes `/etc/resolver/<domain>` and starts no resolver — and that
+removal is the whole point, because **`/etc/resolver` takes precedence over the
+system resolver**. Leaving it in place alongside a network-wide rewrite gives
+you a resolver that looks configured and names that never resolve.
 
-For AdGuard Home, two DNS rewrites are needed — `*.test` does not cover the
+For a network-wide rewrite you need two entries; `*.test` does not cover the
 apex:
 
 | Domain | Answer |
@@ -179,62 +197,67 @@ apex:
 | `test` | `127.0.0.1` |
 | `*.test` | `127.0.0.1` |
 
-### The data plane uses `localhost`, not a hostname
+`127.0.0.1` means the loopback of whichever device asked — correct for the
+machine running dragonrun, useless for a phone. Caddy binds `127.0.0.1` only, so
+other devices cannot reach it regardless.
 
-Only `BASE_URL` gets a `.test` name — caddy routes on it, so it genuinely needs
-DNS. Database and SMTP go to `localhost`, because your apps run on the same host
-as the stack and a hostname there buys nothing while costing availability: in
-`external` mode every `.test` lookup depends on the network resolver, so a
-`db.test` DSN stops resolving the moment the machine leaves that network or the
-resolver reboots — and every project fails to start. `localhost` is immune.
+### Database and mail use `localhost`, not a hostname
 
-There is a test pinning this (`TestDataPlaneDSNsDoNotDependOnDNS`); do not
-"tidy" the DSNs back onto hostnames.
+Only `BASE_URL` gets a `.test` name, because Caddy routes on it. The database
+and SMTP DSNs point at `localhost`.
 
-**`127.0.0.1` means the loopback of whichever device asked.** That is correct
-for the machine running dragonrun and wrong for every other device on the
-network — a phone resolving `api.test` gets *itself*. caddy binds `127.0.0.1`
-only, so other devices could not reach it regardless.
-
-To serve the LAN you would need caddy republished on `0.0.0.0`, the rewrite
-pointing at this machine's address, and Caddy's root CA installed on each
-device. Note that under OrbStack ports 80/443 are already accepted on the LAN
-address by OrbStack's own wildcard listener — so pointing a rewrite there
-without republishing caddy gives a hang, not a clean "connection refused".
+Your application runs on the same host as the stack, so a hostname buys nothing
+there while costing availability: in `external` mode every `.test` lookup
+depends on the network resolver, so a `db.test` DSN stops resolving the moment
+the machine leaves that network — and every project fails to boot. A browser URL
+failing off-network is an annoyance; an application failing to start is not.
 
 ## Commands
 
-Grouped by what they touch — machine state outlives the stack, and the stack
-outlives any project. Installing the **binary** is not dragonrun's job; that is
+Grouped by what they touch. Machine state outlives the stack, and the stack
+outlives any project. Installing the **binary** is not among them — that is
 `go install`.
+
+**Machine**
 
 | | |
 |---|---|
 | `init` | prepare this machine: stack, DNS, local CA (once) |
-| `up` / `down` / `logs` / `status` | stack lifecycle |
-| `new <name>` | create a project from scratch and write its `.env` |
-| `adopt [path]` | infer and register an existing repo (`--dry-run`, `-w`) |
-| `register <name>` | register explicitly (`--upstream`, `--db`, `--tenants`) |
-| `show [name]` | URLs, credentials, DSNs and databases for one project |
-| `tidy [path]` | delete the per-project stack files, once safe (`--apply`) |
-| `env [name]` | print, or `--write` to merge into `.env` |
-| `db list \| create \| drop \| reset \| harden` | inspect and manage databases |
-| `psql [name] [db]` | shell as the project's own role |
-| `sync` | rebuild everything from `registry.json` |
-| `delete <name>` | unregister (`--data` also drops databases; aliases `remove`, `rm`) |
-| `dns [mode]` | show, or switch between `dnsmasq` and `external` |
-| `trust` | trust caddy's CA |
 | `destroy` | undo `init` entirely — containers, data, DNS, CA |
+| `dns [mode]` | show, or switch between `dnsmasq` and `external` |
+| `trust` | trust Caddy's CA (`--prune` removes superseded ones) |
 
-## Dropping the per-project stack
+**Stack**
 
-`dragonrun tidy` reports whether a repo's `docker-compose.yml`, `postgres/` and
-`pgbouncer/` are still needed, and deletes them with `--apply`.
+| | |
+|---|---|
+| `up` / `down` | start, stop (`down -v` also deletes data) |
+| `status` | health, DNS wiring, registered projects |
+| `logs [service]` | tail |
 
-It refuses when the compose file runs anything dragonrun does not provide.
-Across this fleet that means `redis`, `keycloak`, `minio`, `openbao` and whole
-app stacks — those repos keep their compose file, and tidy says which services
-are the reason:
+**Projects**
+
+| | |
+|---|---|
+| `new <name>` | create from scratch and write `.env` |
+| `adopt [path]` | infer and register an existing repo |
+| `show [name]` | URLs, credentials, DSNs, databases |
+| `env [name]` | print, or `--write` to merge into `.env` |
+| `psql [name] [db]` | shell as the project's own role |
+| `db list \| create \| drop \| reset \| harden` | manage databases |
+| `tidy [path]` | delete per-project stack files, once safe |
+| `delete <name>` | unregister (`--data` also drops databases) |
+| `register` / `sync` | explicit registration; rebuild from the registry |
+
+## Adopting and tidying up
+
+`tidy` reports whether a repository's `docker-compose.yml` and its
+`postgres/` and `pgbouncer/` build contexts are still needed, and deletes them
+with `--apply`.
+
+It refuses when the compose file runs anything dragonrun does not provide —
+Redis, an identity provider, object storage, or the application's own services.
+Those projects keep their compose file, and `tidy` names the reason:
 
 ```
     postgres       replaced by dragonrun's postgres
@@ -244,8 +267,10 @@ are the reason:
   → keeping docker-compose.yml: it still runs redis
 ```
 
-It also refuses on a repo that has not been adopted, since removing its stack
-first would leave it with no database at all.
+It also refuses on a repository that has not been adopted, since removing its
+stack first would leave it with no database at all. Build contexts are deleted
+only if they look like stack scaffolding — a `Dockerfile` plus shell and config
+files, nothing else — so a context containing source code is left alone.
 
 ## Removing things
 
@@ -257,32 +282,36 @@ first would leave it with no database at all.
 | all data, stack stays installed | `dragonrun down -v` |
 | everything, including DNS and CA | `dragonrun destroy` |
 
-`destroy` is the counterpart to `init`: containers, volumes, the resolver
-file, the trusted CA and `DRAGONRUN_HOME` all go. It requires typing `destroy`.
-Repositories are never touched, so their `.env` files survive pointing at
-nothing.
-
-Each instance uses its own docker compose project name, derived from
-`DRAGONRUN_HOME`. That is load-bearing: the compose file declares
-`name: dragonrun`, so without it a second instance — a scratch one for testing,
-say — shares containers and volumes with the real stack no matter what ports or
-paths it was given, and its `down -v` destroys real data.
+`destroy` is the counterpart to `init`. It requires typing `destroy`, and never
+touches your repositories — their `.env` files survive, pointing at nothing.
 
 ## State
 
-`~/.dragonrun/` — `registry.json` (0600, holds passwords), the extracted stack,
-generated caddy sites and pgweb bookmarks. The registry is the source of truth;
-`dragonrun sync` rebuilds the cluster from it after a `down -v`.
+`$DRAGONRUN_HOME` (default `~/.dragonrun`) holds `registry.json`, the extracted
+stack, and generated Caddy sites and pgweb bookmarks. The registry is the source
+of truth: after `down -v`, `dragonrun sync` rebuilds every role, database and
+route from it.
+
+`registry.json` is mode `0600` and contains every project's database password in
+plain text. It lives outside any working tree for that reason.
+
+Each instance uses its own Docker Compose project name, derived from
+`$DRAGONRUN_HOME`. That is load-bearing: the compose file declares a fixed
+project name, so without it a second instance — a scratch one for testing, say —
+shares containers and volumes with the real stack no matter what ports or paths
+it was given, and its `down -v` destroys real data.
 
 ## Notes
 
-- `.test` is reserved by RFC 6761. Not `.dev` (real TLD, HSTS-preloaded, breaks
-  plain http) and not `.local` (mDNS, fights macOS).
-- dnsmasq publishes high (`15353`); `/etc/resolver/test` carries a matching
-  `port` line, so no privileged bind and no fight with anything on 53.
-- dnsmasq must NOT be given `listen-address=0.0.0.0`: it matches each query's
-  destination address against that list, `0.0.0.0` never matches a real
-  destination, and every query is dropped in silence while `netstat` shows a
-  healthy listener.
-- Ports are overridable at install (`--postgres-port`, `--https-port`, …) — a
-  tool for ending port collisions should not itself be the immovable one.
+- dnsmasq publishes on a high port (`15353`); `/etc/resolver/test` carries a
+  matching `port` line, so nothing needs a privileged bind or a fight with
+  whatever else answers on 53.
+- Do not give dnsmasq `listen-address=0.0.0.0`. It matches each query's
+  destination against that list, `0.0.0.0` never matches a real destination, and
+  every query is dropped in silence while `netstat` shows a healthy listener.
+- Ports are overridable at `init` (`--postgres-port`, `--https-port`, …). A tool
+  whose purpose is ending port collisions should not itself be the immovable one.
+
+## License
+
+Apache License 2.0. See [LICENSE](LICENSE).
