@@ -1,0 +1,12 @@
+# Build output
+/bin/
+/dist/
+
+# dragonrun writes its state to $DRAGONRUN_HOME (~/.dragonrun by default),
+# never into the working tree — but a stray local run or test should not be
+# committable if that ever changes.
+/.dragonrun/
+*.tmp
+
+.env
+.DS_Store

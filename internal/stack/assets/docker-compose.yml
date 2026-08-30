@@ -1,0 +1,111 @@
+name: dragonrun
+
+# The single shared dev stack. Everything binds 127.0.0.1 only — this is a
+# local development edge, not something to expose on a LAN.
+#
+# Ports are deliberately the CANONICAL ones (5432, 6432, 1025, 8025, 8081).
+# The ~60 per-project compose files in these repos already bind exactly these,
+# so once a project's own stack is down, its existing localhost DSNs land here
+# unchanged. That is the whole migration story for mail: nothing to edit.
+
+services:
+  postgres:
+    build:
+      context: ./postgres
+    container_name: dragonrun-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${SUPERUSER:-dragon}
+      POSTGRES_PASSWORD: ${SUPERUSER_PASSWORD:?set in stack/.env}
+      POSTGRES_DB: postgres
+      PGBOUNCER_AUTH_PASSWORD: ${PGBOUNCER_AUTH_PASSWORD:?set in stack/.env}
+      PGDATA: /var/lib/postgresql/18/docker
+    ports:
+      - "127.0.0.1:${PORT_POSTGRES:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/18/docker
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  pgbouncer:
+    build:
+      context: ./pgbouncer
+    container_name: dragonrun-pgbouncer
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGBOUNCER_AUTH_PASSWORD: ${PGBOUNCER_AUTH_PASSWORD:?set in stack/.env}
+    ports:
+      - "127.0.0.1:${PORT_BOUNCER:-6432}:6432"
+
+  mailpit:
+    image: axllent/mailpit@sha256:e22dce5b36f93c77082e204a3942fb6b283b7896e057458400a4c88344c3df68
+    container_name: dragonrun-mailpit
+    restart: unless-stopped
+    environment:
+      MP_MAX_MESSAGES: 5000
+      MP_SMTP_AUTH_ACCEPT_ANY: 1
+      MP_SMTP_AUTH_ALLOW_INSECURE: 1
+    ports:
+      - "127.0.0.1:${PORT_SMTP:-1025}:1025"
+      - "127.0.0.1:${PORT_MAILUI:-8025}:8025"
+
+  # One pgweb in --sessions mode: connect as superuser and switch databases in
+  # the UI. `dragonrun register` drops a bookmark per project into bookmarks/,
+  # so every project — and every tenant DB it spawns — is one click away.
+  pgweb:
+    image: sosedoff/pgweb@sha256:a5256d416e2e8b92d69a4459058e3eca33a9f075d8325491644411d0bc3bd70b
+    container_name: dragonrun-pgweb
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: ["pgweb", "--bind=0.0.0.0", "--listen=8081", "--sessions", "--bookmarks-dir=/bookmarks"]
+    volumes:
+      - ${DRAGONRUN_HOME}/pgweb/bookmarks:/bookmarks:ro
+    ports:
+      - "127.0.0.1:${PORT_PGWEB:-8081}:8081"
+
+  caddy:
+    image: caddy:2-alpine
+    container_name: dragonrun-caddy
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${PORT_HTTP:-80}:80"
+      - "127.0.0.1:${PORT_HTTPS:-443}:443"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ${DRAGONRUN_HOME}/caddy/sites:/etc/caddy/sites:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+  # Wildcard *.test -> 127.0.0.1. Published high so it never needs a
+  # privileged bind; /etc/resolver/test carries a matching `port` line.
+  # Behind a profile: with `dragonrun dns external` the container is never
+  # created at all, leaving name resolution to AdGuard Home / Pi-hole / router.
+  dnsmasq:
+    profiles: ["dnsmasq"]
+    image: 4km3/dnsmasq:2.90-r3
+    container_name: dragonrun-dnsmasq
+    restart: unless-stopped
+    command: ["-k", "--log-facility=-", "--conf-file=/etc/dnsmasq.conf"]
+    cap_add:
+      - NET_ADMIN
+    volumes:
+      - ./dnsmasq/dnsmasq.conf:/etc/dnsmasq.conf:ro
+    ports:
+      - "127.0.0.1:${PORT_DNS:-15353}:53/udp"
+      - "127.0.0.1:${PORT_DNS:-15353}:53/tcp"
+
+volumes:
+  postgres_data:
+  caddy_data:
+  caddy_config:
