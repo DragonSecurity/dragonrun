@@ -1,0 +1,75 @@
+version: 2
+
+project_name: dragonrun
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: dragonrun
+    main: ./main.go
+    binary: dragonrun
+    env:
+      - CGO_ENABLED=0
+    mod_timestamp: '{{ .CommitTimestamp }}'
+    flags:
+      - -trimpath
+    ldflags:
+      - "-s -w -X git.dragonsecurity.io/dragonrun/cmd.version={{ if .Tag }}{{ .Tag }}{{ else }}dev{{ end }} -X git.dragonsecurity.io/dragonrun/cmd.commit={{ .ShortCommit }} -X git.dragonsecurity.io/dragonrun/cmd.date={{ .Date }}"
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+
+archives:
+  - id: dragonrun
+    ids:
+      - dragonrun
+    formats:
+      - tar.gz
+    name_template: >-
+      {{ .ProjectName }}_
+      {{- .Os }}_
+      {{- .Arch }}
+    files:
+      - LICENSE
+      - README.md
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  use: github
+  sort: asc
+  groups:
+    - title: Features
+      regexp: '^.*?feat(\([[:word:]]+\))??!?:.+$'
+      order: 0
+    - title: Fixes
+      regexp: '^.*?fix(\([[:word:]]+\))??!?:.+$'
+      order: 1
+    - title: Other
+      order: 99
+  filters:
+    exclude:
+      - '^docs:'
+      - '^test:'
+      - '^chore\(deps\):'
+      - '^ci:'
+
+release:
+  # A release is only "undoable" by deleting it, so start it as a draft and let
+  # a human publish. The workflow does not auto-publish.
+  draft: true
+  prerelease: auto
+  footer: |
+    ---
+
+    Install with:
+
+        go install git.dragonsecurity.io/dragonrun@{{ .Tag }}
+
+    Then run `dragonrun init`. See the README for requirements.

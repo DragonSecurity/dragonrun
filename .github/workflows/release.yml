@@ -1,0 +1,70 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # A tag push is the one action that is genuinely hard to undo: reverting it
+  # means deleting a published release. Re-run the suite here rather than trust
+  # that CI was green on whatever commit the tag happens to point at.
+  verify:
+    name: verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test
+        run: go test ./... -race
+
+      - name: embedded stack assets
+        env:
+          SUPERUSER: ci
+          SUPERUSER_PASSWORD: ci
+          PGBOUNCER_AUTH_PASSWORD: ci
+          DRAGONRUN_HOME: /tmp/dragonrun-ci
+        run: |
+          docker compose \
+            -f internal/stack/assets/docker-compose.yml \
+            --profile dnsmasq \
+            config -q
+          shellcheck --severity=warning $(find internal/stack/assets -name '*.sh')
+
+  goreleaser:
+    name: goreleaser
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          # GoReleaser builds the changelog from history, which a shallow
+          # checkout does not have.
+          fetch-depth: 0
+
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - uses: goreleaser/goreleaser-action@e435ccd777264be153ace6237001ef4d979d3a7a # v6.4.0
+        with:
+          version: "~> v2"
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

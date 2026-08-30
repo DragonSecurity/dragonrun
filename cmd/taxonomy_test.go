@@ -38,7 +38,8 @@ func TestLegacyNamesRefuseToAct(t *testing.T) {
 // each one touches.
 func TestEveryCommandHasAGroup(t *testing.T) {
 	valid := map[string]bool{groupMachine: true, groupStack: true, groupProject: true}
-	builtin := map[string]bool{"help": true, "completion": true}
+	// version is meta, like help: it belongs to no scope.
+	builtin := map[string]bool{"help": true, "completion": true, "version": true}
 	for _, c := range root.Commands() {
 		if c.Hidden || builtin[c.Name()] {
 			continue
