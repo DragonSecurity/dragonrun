@@ -100,13 +100,18 @@ const (
 )
 
 type Config struct {
-	Domain                string             `json:"domain"`
-	DNS                   string             `json:"dns"`
-	Ports                 Ports              `json:"ports"`
-	Superuser             string             `json:"superuser"`
-	SuperuserPassword     string             `json:"superuser_password"`
-	PgbouncerAuthPassword string             `json:"pgbouncer_auth_password"`
-	Projects              map[string]Project `json:"projects"`
+	Domain                string `json:"domain"`
+	DNS                   string `json:"dns"`
+	Ports                 Ports  `json:"ports"`
+	Superuser             string `json:"superuser"`
+	SuperuserPassword     string `json:"superuser_password"`
+	PgbouncerAuthPassword string `json:"pgbouncer_auth_password"`
+	// TrustedCAs are SHA-1 fingerprints of every caddy root dragonrun has put
+	// in the system keychain. Recreating the caddy volume mints a brand new CA,
+	// so without this the old one lingers as trusted-but-useless clutter and a
+	// fresh one accumulates on every reset.
+	TrustedCAs []string           `json:"trusted_cas,omitempty"`
+	Projects   map[string]Project `json:"projects"`
 }
 
 // Home is ~/.dragonrun -- generated artefacts plus registry.json.
@@ -234,6 +239,19 @@ func (c *Config) DBTaken(db, except string) (string, bool) {
 // would produce a second `mail.test` site block and caddy refuses duplicate
 // addresses, taking the whole edge down rather than just that project.
 var Reserved = map[string]bool{"mail": true, "pgweb": true, "db": true}
+
+// RecordCA remembers a fingerprint dragonrun trusted, and reports which
+// previously-trusted ones are now superseded.
+func (c *Config) RecordCA(fp string) []string {
+	var superseded []string
+	for _, old := range c.TrustedCAs {
+		if old != fp {
+			superseded = append(superseded, old)
+		}
+	}
+	c.TrustedCAs = []string{fp}
+	return superseded
+}
 
 func ValidName(s string) error {
 	if Reserved[s] {

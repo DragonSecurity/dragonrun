@@ -161,18 +161,85 @@ var trustCmd = &cobra.Command{
 	Use:     "trust",
 	GroupID: groupMachine,
 	Short:   "Trust caddy's local CA so https://*.test stops warning",
+	Long: `Installs caddy's current local CA into the system keychain.
+
+Recreating the caddy volume -- ` + "`down -v`" + `, ` + "`destroy`" + `, or a wiped docker --
+mints a brand new CA. The old one stays trusted but matches nothing, so they
+accumulate. --prune removes superseded ones.`,
 	RunE: func(cmd *cobra.Command, _ []string) error {
-		if _, err := load(); err != nil {
+		c, err := load()
+		if err != nil {
 			return err
 		}
 		ca, err := edge.RootCA()
 		if err != nil {
 			return err
 		}
-		fmt.Println("trusting", ca, "(sudo)")
-		return edge.TrustCA(ca)
+		fp, err := edge.Fingerprint(ca)
+		if err != nil {
+			return err
+		}
+
+		inKeychain, _ := edge.KeychainCAs()
+		already := false
+		for _, k := range inKeychain {
+			if k == fp {
+				already = true
+			}
+		}
+		if already {
+			fmt.Println("caddy's current CA is already trusted")
+		} else {
+			fmt.Println("trusting", ca, "(sudo)")
+			if err := edge.TrustCA(ca); err != nil {
+				return err
+			}
+		}
+
+		// Anything else under this name is a caddy root that no longer matches
+		// what caddy serves -- almost always one dragonrun trusted before the
+		// volume was recreated.
+		var stale []string
+		for _, k := range inKeychain {
+			if k != fp {
+				stale = append(stale, k)
+			}
+		}
+		superseded := c.RecordCA(fp)
+		if err := c.Save(); err != nil {
+			return err
+		}
+
+		if len(stale) == 0 {
+			return nil
+		}
+		if !trustPrune {
+			fmt.Printf("\n%d superseded caddy CA(s) still trusted:\n", len(stale))
+			for _, k := range stale {
+				tag := ""
+				for _, s := range superseded {
+					if s == k {
+						tag = "  (trusted by dragonrun)"
+					}
+				}
+				fmt.Printf("  %s%s\n", k, tag)
+			}
+			fmt.Println("\nremove them with:  dragonrun trust --prune")
+			return nil
+		}
+		fmt.Printf("\npruning %d superseded CA(s) (sudo)\n", len(stale))
+		for _, k := range stale {
+			if err := edge.DeleteCA(k); err != nil {
+				fmt.Printf("  could not remove %s: %v\n", k, err)
+				continue
+			}
+			fmt.Println("  removed", k)
+		}
+		return nil
 	},
 }
+
+var trustPrune bool
 
 var noDNS, noTrust bool
 
@@ -190,6 +257,8 @@ func init() {
 		"dnsmasq (run our own resolver) or external (AdGuard/Pi-hole already answers *.test)")
 	installCmd.Flags().BoolVar(&noDNS, "no-dns", false, "skip writing /etc/resolver")
 	installCmd.Flags().BoolVar(&noTrust, "no-trust", false, "skip trusting the local CA")
+	trustCmd.Flags().BoolVar(&trustPrune, "prune", false,
+		"also remove caddy CAs that no longer match what caddy serves")
 	dnsCmd.Flags().BoolVar(&dnsYes, "yes", false, "skip the confirmation prompt")
 	root.AddCommand(installCmd, trustCmd, dnsCmd, legacyInstallCmd, legacyUninstallCmd)
 }

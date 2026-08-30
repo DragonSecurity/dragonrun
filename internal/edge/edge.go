@@ -217,6 +217,35 @@ func UntrustCA(rootCrt string) (bool, error) {
 	return true, nil
 }
 
+// Fingerprint returns the SHA-1 of a PEM certificate, formatted the way
+// `security find-certificate -Z` prints it.
+func Fingerprint(path string) (string, error) { return fingerprint(path) }
+
+// KeychainCAs lists every trusted caddy root, by fingerprint. Used to find
+// roots left behind when the caddy volume was recreated.
+func KeychainCAs() ([]string, error) {
+	out, err := exec.Command("security", "find-certificate", "-a", "-Z",
+		"-c", "Caddy Local Authority", "/Library/Keychains/System.keychain").Output()
+	if err != nil {
+		return nil, nil // none present, or no keychain access
+	}
+	var fps []string
+	for _, line := range strings.Split(string(out), "\n") {
+		if _, hash, ok := strings.Cut(line, "SHA-1 hash: "); ok {
+			fps = append(fps, strings.TrimSpace(hash))
+		}
+	}
+	return fps, nil
+}
+
+// DeleteCA removes one certificate from the system keychain by fingerprint.
+func DeleteCA(fp string) error {
+	cmd := exec.Command("sudo", "security", "delete-certificate",
+		"-Z", fp, "/Library/Keychains/System.keychain")
+	cmd.Stdout, cmd.Stderr, cmd.Stdin = os.Stderr, os.Stderr, os.Stdin
+	return cmd.Run()
+}
+
 // fingerprint returns the SHA-1 of a PEM certificate, formatted the way
 // `security find-certificate -Z` prints it (uppercase hex, no separators).
 func fingerprint(path string) (string, error) {
