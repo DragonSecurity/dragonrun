@@ -3,6 +3,7 @@ package cmd
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -64,7 +65,13 @@ the local resolver is down the names simply stop resolving.`,
 				fmt.Printf("resolver  %s — %s\n", dnsconf.Path(c.Domain), state)
 			}
 			probe := "probe." + c.Domain
-			fmt.Printf("resolves  *.%s -> %v (probed %s)\n", c.Domain, dnsconf.Resolves(probe), probe)
+			addrs := dnsconf.Addrs(probe)
+			if len(addrs) == 0 {
+				fmt.Printf("resolves  *.%s -> nothing (probed %s)\n", c.Domain, probe)
+			} else {
+				fmt.Printf("resolves  *.%s -> %s (probed %s)\n", c.Domain, strings.Join(addrs, ", "), probe)
+			}
+			fmt.Printf("edge      %s:%d, %s:%d\n", c.Bind, c.Ports.HTTP, c.Bind, c.Ports.HTTPS)
 			return nil
 		}
 
@@ -98,7 +105,10 @@ the local resolver is down the names simply stop resolving.`,
 			}
 			stack.SetDNSMode(mode)
 			fmt.Printf("\nnow in external mode — your network resolver must answer *.%s\n", c.Domain)
-			fmt.Printf("verify:  dig +short anything.%s   (expect 127.0.0.1)\n", c.Domain)
+			fmt.Printf("verify:  dig +short anything.%s\n", c.Domain)
+			fmt.Printf("         expect an address on THIS machine — 127.0.0.1, or its LAN\n")
+			fmt.Printf("         address if your resolver rewrites to that. For the latter the\n")
+			fmt.Printf("         edge must be published there too: `dragonrun bind`.\n")
 		case registry.DNSDnsmasq:
 			if _, err := stack.Extract(); err != nil {
 				return err

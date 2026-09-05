@@ -55,9 +55,14 @@ func Vars(c *registry.Config, p registry.Project) map[string]string {
 		"RIVER_DATABASE_URL": pooled,
 		"SMTP_SERVER":        "localhost",
 		"SMTP_PORT":          fmt.Sprint(c.Ports.SMTP),
-		"BASE_URL":           base,
-		"BIND_HOST":          "localhost",
-		"BIND_PORT":          fmt.Sprint(p.Upstream),
+	}
+	// A database-only project has nothing to bind and no URL a browser could
+	// ask for. Emitting BIND_PORT=0 and a BASE_URL that resolves to nothing
+	// would be worse than omitting them: it reads as configuration.
+	if p.Serves() {
+		v["BASE_URL"] = base
+		v["BIND_HOST"] = "localhost"
+		v["BIND_PORT"] = fmt.Sprint(p.Upstream)
 	}
 	if p.Tenants {
 		v["ADMIN_DATABASE_URL"] = direct

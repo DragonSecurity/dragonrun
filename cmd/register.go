@@ -18,7 +18,30 @@ var (
 	regDB       string
 	regTenants  bool
 	regPath     string
+	regNoSite   bool
 )
+
+// reconcile makes the stack match one registry entry: role, database, route
+// and bookmark. register, set and sync all go through it, so a project cannot
+// end up half-provisioned by whichever command happened to touch it last.
+func reconcile(c *registry.Config, p registry.Project) error {
+	if err := provision.EnsureRole(c, p); err != nil {
+		return err
+	}
+	if err := provision.EnsureDB(c, p); err != nil {
+		return err
+	}
+	// RemoveSite rather than skip: a project that HAD a route and just lost one
+	// must stop being served, not keep the file it was registered with.
+	if !p.Serves() {
+		if err := edge.RemoveSite(p.Name); err != nil {
+			return err
+		}
+	} else if err := edge.WriteSite(p); err != nil {
+		return err
+	}
+	return edge.WriteBookmark(c, p)
+}
 
 var registerCmd = &cobra.Command{
 	Use:     "register <name>",
@@ -32,7 +55,13 @@ var registerCmd = &cobra.Command{
   a pgweb bookmark
 
 Re-running is safe: it reconciles rather than recreating, so the password and
-any existing data survive.`,
+any existing data survive. That is also how you CHANGE a registered project,
+though ` + "`dragonrun set`" + ` says it more plainly.
+
+--no-site (or --upstream 0) registers a project with no HTTP route at all: a
+migration scratch database, a worker, a schema two other repos share. It gets a
+role, a database and a bookmark, claims no host port, and can never collide
+with a project that does serve.`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		name := args[0]
@@ -70,8 +99,21 @@ any existing data survive.`,
 		if p.Host == "" {
 			p.Host = name + "." + c.Domain
 		}
+		// `--upstream 0` says the same thing as --no-site: no port, so nothing
+		// to route to. Both spellings are accepted so neither is a silent
+		// no-op, and naming a real port is how a database-only project gets a
+		// route BACK -- without that it would keep resetting to 0 forever.
 		if cmd.Flags().Changed("upstream") {
 			p.Upstream = regUpstream
+			p.NoSite = regUpstream == 0
+		}
+		if cmd.Flags().Changed("no-site") {
+			p.NoSite = regNoSite
+		}
+		if p.NoSite {
+			p.Upstream = 0
+		} else if p.Upstream == 0 {
+			p.NoSite = true
 		}
 		if cmd.Flags().Changed("tenants") {
 			p.Tenants = regTenants
@@ -97,16 +139,7 @@ any existing data survive.`,
 				p.Upstream, other)
 		}
 
-		if err := provision.EnsureRole(c, p); err != nil {
-			return err
-		}
-		if err := provision.EnsureDB(c, p); err != nil {
-			return err
-		}
-		if err := edge.WriteSite(p); err != nil {
-			return err
-		}
-		if err := edge.WriteBookmark(c, p); err != nil {
+		if err := reconcile(c, p); err != nil {
 			return err
 		}
 		// Keeps the built-in sites present even if DRAGONRUN_HOME was wiped.
@@ -126,8 +159,13 @@ any existing data survive.`,
 		if existing {
 			verb = "updated"
 		}
-		fmt.Printf("%s %s\n  https://%s -> host:%d\n  database %s (role %s)\n",
-			verb, p.Name, p.Host, p.Upstream, p.DB, p.Role)
+		if p.Serves() {
+			fmt.Printf("%s %s\n  https://%s -> host:%d\n  database %s (role %s)\n",
+				verb, p.Name, p.Host, p.Upstream, p.DB, p.Role)
+		} else {
+			fmt.Printf("%s %s\n  no site — database only\n  database %s (role %s)\n",
+				verb, p.Name, p.DB, p.Role)
+		}
 		if p.Tenants {
 			fmt.Printf("  tenant databases: %s*  (role has CREATEDB)\n", p.TenantPrefix())
 		}
@@ -206,16 +244,7 @@ var syncCmd = &cobra.Command{
 			return fmt.Errorf("the stack is not running — run `dragonrun up` first")
 		}
 		for _, p := range c.Sorted() {
-			if err := provision.EnsureRole(c, p); err != nil {
-				return err
-			}
-			if err := provision.EnsureDB(c, p); err != nil {
-				return err
-			}
-			if err := edge.WriteSite(p); err != nil {
-				return err
-			}
-			if err := edge.WriteBookmark(c, p); err != nil {
+			if err := reconcile(c, p); err != nil {
 				return err
 			}
 			fmt.Println("synced", p.Name)
@@ -236,6 +265,7 @@ func init() {
 	registerCmd.Flags().StringVar(&regDB, "db", "", "control database name (default <name>)")
 	registerCmd.Flags().BoolVar(&regTenants, "tenants", false, "grant CREATEDB for runtime tenant databases")
 	registerCmd.Flags().StringVar(&regPath, "path", "", "repository path (default current directory)")
+	registerCmd.Flags().BoolVar(&regNoSite, "no-site", false, "database only: no hostname, no route, no host port")
 	removeCmd.Flags().BoolVar(&rmData, "data", false, "also drop the databases and role")
 	root.AddCommand(registerCmd, removeCmd, syncCmd)
 }

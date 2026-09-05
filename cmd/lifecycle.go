@@ -32,13 +32,26 @@ var upCmd = &cobra.Command{
 		if err := stack.WriteEnv(c); err != nil {
 			return err
 		}
-		// Rewritten on every up so a changed domain, or a new built-in
-		// service, is picked up without a separate command.
+		// Rewritten on every up so a changed domain, a new built-in service,
+		// or a change to what dragonrun generates is picked up without a
+		// separate command -- project site files included, which otherwise
+		// keep whatever `register` wrote.
 		if err := edge.WriteServiceSites(c); err != nil {
+			return err
+		}
+		if err := edge.WriteAllSites(c); err != nil {
 			return err
 		}
 		if err := stack.Compose("up", "-d", "--build"); err != nil {
 			return err
+		}
+		// An install from before certificate lifetimes were raised is still
+		// signing 12-hour leaves off a week-long intermediate. Fix it here so
+		// upgrading the binary and running `up` is the whole remedy.
+		if rotated, err := edge.EnsureCertLifetimes(); err != nil {
+			return err
+		} else if rotated {
+			fmt.Println("rotated the local CA intermediate — certificates now last 90 days")
 		}
 		return edge.Reload()
 	},
@@ -123,9 +136,47 @@ var statusCmd = &cobra.Command{
 		}
 		// Any name under the domain proves the wildcard works; nothing in a
 		// generated env depends on this name resolving.
+		//
+		// The address is PRINTED rather than asserted to be loopback: a
+		// network-wide rewrite normally points the domain at this machine's
+		// LAN address, which is correct, and the two failures worth naming --
+		// no answer at all, or an answer pointing at some other host -- both
+		// read straight off the address.
 		probe := "probe." + c.Domain
-		fmt.Printf("  %s *.%s resolves to 127.0.0.1 (probed %s)\n",
-			mark(dnsconf.Resolves(probe)), c.Domain, probe)
+		addrs := dnsconf.Addrs(probe)
+		switch {
+		case len(addrs) == 0:
+			fmt.Printf("  MISS *.%s does not resolve (probed %s)\n", c.Domain, probe)
+		default:
+			fmt.Printf("  %s *.%s -> %s (probed %s)\n",
+				mark(dnsconf.Resolves(probe)), c.Domain, strings.Join(addrs, ", "), probe)
+			for _, ip := range addrs {
+				if !dnsconf.Local(ip) {
+					fmt.Printf("       %s is not an address on this machine — the edge cannot answer there\n", ip)
+				}
+			}
+		}
+
+		// A LAN-bound edge is the one piece of stack state that is a security
+		// decision rather than a convenience, so it is stated every time.
+		fmt.Println("\nedge")
+		fmt.Printf("  bind %s (ports %d, %d)\n", c.Bind, c.Ports.HTTP, c.Ports.HTTPS)
+		if c.LANBound() {
+			fmt.Printf("  NOTE reachable from the network — including mail.%s and pgweb.%s\n",
+				c.Domain, c.Domain)
+		} else {
+			// Loopback edge + a domain that resolves to the LAN address is the
+			// exact state where every site is unreachable from this machine
+			// too, and nothing else in `status` would say so.
+			for _, ip := range addrs {
+				if dnsconf.Local(ip) && !dnsconf.Loopback(ip) {
+					fmt.Printf("  MISS *.%s resolves to %s but the edge only listens on %s\n",
+						c.Domain, ip, c.Bind)
+					fmt.Printf("       run `dragonrun bind %s` (or 0.0.0.0)\n", ip)
+					break
+				}
+			}
+		}
 
 		fmt.Println("\nprojects")
 		if len(c.Projects) == 0 {
@@ -137,26 +188,35 @@ var statusCmd = &cobra.Command{
 			if p.Tenants {
 				tenants = "  [multi-tenant]"
 			}
-			fmt.Printf("  %-20s https://%-24s -> host:%d%s\n",
-				p.Name, p.Host, p.Upstream, tenants)
+			if p.Serves() {
+				fmt.Printf("  %-20s https://%-24s -> host:%d%s\n",
+					p.Name, p.Host, p.Upstream, tenants)
+			} else {
+				fmt.Printf("  %-20s %-32s db %s%s\n",
+					p.Name, "(no site)", p.DB, tenants)
+			}
 			if p.Path != "" {
 				fmt.Printf("  %-20s %s\n", "", p.Path)
 			}
 		}
 
 		// The one collision dragonrun cannot prevent: two projects that were
-		// registered against the same host port.
+		// registered against the same host port. Database-only projects all
+		// carry 0 and are not competing for anything.
 		seen := map[int][]string{}
 		for _, p := range c.Sorted() {
-			seen[p.Upstream] = append(seen[p.Upstream], p.Name)
+			if p.Serves() {
+				seen[p.Upstream] = append(seen[p.Upstream], p.Name)
+			}
 		}
 		for port, names := range seen {
 			if len(names) > 1 {
-				fmt.Printf("\n  CONFLICT: port %d claimed by %s — `dragonrun register --upstream` one of them\n",
-					port, strings.Join(names, ", "))
+				fmt.Printf("\n  CONFLICT: port %d claimed by %s — move one with `dragonrun set %s --upstream <port>`\n",
+					port, strings.Join(names, ", "), names[0])
 			}
 		}
-		return nil
+
+		return reportOrphans(c)
 	},
 }
 

@@ -22,10 +22,19 @@ type hints struct {
 	name      string
 	db        string
 	upstream  int
+	portWhy   string // where the port came from, empty if nothing declared one
 	tenants   bool
 	tenantWhy string
 	ports     []string // host ports the old compose claimed, for the report
 }
+
+// serves reports whether the repo showed any sign of being an HTTP service.
+//
+// Nothing declaring a port used to fall back to 8080, which is how two repos
+// that never mentioned a port both ended up claiming it and colliding. No
+// evidence of a port is evidence of no server: register it database-only and
+// let `dragonrun set <name> --upstream N` say otherwise.
+func (h hints) serves() bool { return h.portWhy != "" }
 
 // skipDirs are never worth walking when looking for tenant provisioning: they
 // are large, and a CREATE DATABASE found in a vendored dependency says nothing
@@ -80,10 +89,7 @@ var assignRE = regexp.MustCompile(`^\s*#?\s*([A-Z][A-Z0-9_]*)\s*=\s*(.*)$`)
 var portRE = regexp.MustCompile(`^\s*-\s*"?(?:\d+\.\d+\.\d+\.\d+:)?(\d+):(\d+)"?\s*$`)
 
 func scanHints(dir string) (hints, error) {
-	h := hints{
-		name:     filepath_Base(dir),
-		upstream: 8080,
-	}
+	h := hints{name: filepath_Base(dir)}
 	h.db = registry.RoleName(h.name)
 
 	// .env wins over .env.example: it reflects what this checkout actually runs.
@@ -103,7 +109,7 @@ func scanHints(dir string) (hints, error) {
 			switch key {
 			case "BIND_PORT", "PORT", "HTTP_PORT":
 				if n, err := strconv.Atoi(val); err == nil && n > 0 && n < 65536 {
-					h.upstream = n
+					h.upstream, h.portWhy = n, key+" in "+f
 				}
 			case "DB_NAME":
 				if val != "" {
@@ -151,6 +157,10 @@ var adoptCmd = &cobra.Command{
 name, control database, host port, and whether it provisions tenant databases
 at runtime, then registers it.
 
+A repo that declares no BIND_PORT, PORT or HTTP_PORT is registered
+database-only rather than being guessed onto 8080 — guessing is how two repos
+that never mentioned a port both end up claiming it.
+
 Nothing in the repo is modified unless you pass --write, and even then only
 .env is touched — the existing docker-compose.yml is left in place as a
 fallback until you are happy.`,
@@ -178,6 +188,15 @@ fallback until you are happy.`,
 			h.tenants, _ = cmd.Flags().GetBool("tenants")
 			h.tenantWhy = "forced by --tenants"
 		}
+		if cmd.Flags().Changed("upstream") {
+			h.upstream, _ = cmd.Flags().GetInt("upstream")
+			h.portWhy = "forced by --upstream"
+		}
+		if cmd.Flags().Changed("no-site") {
+			if noSite, _ := cmd.Flags().GetBool("no-site"); noSite {
+				h.upstream, h.portWhy = 0, ""
+			}
+		}
 		if err := registry.ValidName(h.name); err != nil {
 			return fmt.Errorf("directory name is not usable as a project name: %w — pass `dragonrun register <name>` instead", err)
 		}
@@ -195,7 +214,13 @@ fallback until you are happy.`,
 		fmt.Printf("inferred from %s\n", dir)
 		fmt.Printf("  name      %s\n", h.name)
 		fmt.Printf("  database  %s\n", h.db)
-		fmt.Printf("  upstream  host:%d\n", h.upstream)
+		if h.serves() {
+			fmt.Printf("  upstream  host:%d  (%s)\n", h.upstream, h.portWhy)
+		} else {
+			fmt.Printf("  upstream  none — no BIND_PORT, PORT or HTTP_PORT found\n")
+			fmt.Printf("            registering database-only; add a route with:\n")
+			fmt.Printf("              dragonrun set %s --upstream <port>\n", h.name)
+		}
 		if h.tenants {
 			fmt.Printf("  tenants   true  (%s)\n", h.tenantWhy)
 		} else {
@@ -212,10 +237,13 @@ fallback until you are happy.`,
 
 		// Reuse register's logic wholesale rather than duplicating provisioning.
 		regUpstream, regDB, regTenants, regPath = h.upstream, h.db, h.tenants, dir
+		if !h.serves() {
+			regUpstream = 0
+		}
 		if err := registerCmd.Flags().Set("db", h.db); err != nil {
 			return err
 		}
-		if err := registerCmd.Flags().Set("upstream", strconv.Itoa(h.upstream)); err != nil {
+		if err := registerCmd.Flags().Set("upstream", strconv.Itoa(regUpstream)); err != nil {
 			return err
 		}
 		if err := registerCmd.Flags().Set("tenants", strconv.FormatBool(h.tenants)); err != nil {
@@ -244,6 +272,8 @@ var (
 
 func init() {
 	adoptCmd.Flags().Bool("tenants", false, "override tenant detection (grants or withholds CREATEDB)")
+	adoptCmd.Flags().Int("upstream", 0, "override the detected host port")
+	adoptCmd.Flags().Bool("no-site", false, "register database-only regardless of what was detected")
 	adoptCmd.Flags().BoolVar(&adoptDryRun, "dry-run", false, "show what would be registered and exit")
 	adoptCmd.Flags().BoolVarP(&adoptWrite, "write", "w", false, "also merge the generated env into .env")
 	root.AddCommand(adoptCmd)
