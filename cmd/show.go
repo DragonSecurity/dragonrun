@@ -43,7 +43,11 @@ Defaults to the project matching the current directory name.`,
 		w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 		row(w, "%s\t%s\n", p.Name, p.Path)
 		row(w, "\n")
-		row(w, "  site\thttps://%s\t-> host port %d\n", p.Host, p.Upstream)
+		if p.Serves() {
+			row(w, "  site\thttps://%s\t-> host port %d\n", p.Host, p.Upstream)
+		} else {
+			row(w, "  site\tnone\t(database only)\n")
+		}
 		row(w, "  mail\thttps://mail.%s\t(or localhost:%d)\n", c.Domain, c.Ports.MailUI)
 		row(w, "  pgweb\thttps://pgweb.%s\t(bookmark %q)\n", c.Domain, p.Name)
 		row(w, "\n")

@@ -31,8 +31,9 @@ shared one, and gives each project a hostname instead of a port.
 
 Apps keep running on the host under mprocs. dragonrun only owns the infra.
 
-Commands are grouped by what they touch. Installing the BINARY is not one of
-them -- that is: go install git.dragonsecurity.io/dragonrun@latest`,
+Commands are grouped by what they touch. The first install of the BINARY is not
+one of them -- that is: go install git.dragonsecurity.io/dragonrun@latest
+Afterwards, "dragonrun update" does the same thing without the module path.`,
 	SilenceUsage:  true,
 	SilenceErrors: true,
 }

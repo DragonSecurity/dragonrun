@@ -18,18 +18,16 @@ import (
 // psql runs a script inside the postgres container as the cluster superuser.
 // Connection is over the container's unix socket, so no password is involved.
 func psql(c *registry.Config, db, script string, vars ...string) (string, error) {
-	dir, err := stack.Dir()
-	if err != nil {
-		return "", err
-	}
-	args := []string{
-		"compose", "--project-directory", dir,
-		"-f", dir + "/docker-compose.yml", "--env-file", dir + "/.env",
+	sub := []string{
 		"exec", "-T", "postgres",
 		"psql", "-v", "ON_ERROR_STOP=1", "-U", c.Superuser, "-d", db, "-qtA",
 	}
 	for _, v := range vars {
-		args = append(args, "-v", v)
+		sub = append(sub, "-v", v)
+	}
+	args, err := stack.ComposeArgs(sub...)
+	if err != nil {
+		return "", err
 	}
 	cmd := exec.Command("docker", args...)
 	cmd.Stdin = strings.NewReader(script)
@@ -129,6 +127,27 @@ SELECT datname FROM pg_database
 	return dbs, nil
 }
 
+// AllDatabases lists every non-template database in the cluster, which is the
+// only way to see what is there that the registry does not know about.
+func AllDatabases(c *registry.Config) ([]string, error) {
+	const q = `
+SELECT datname FROM pg_database
+ WHERE NOT datistemplate AND datname <> 'postgres'
+ ORDER BY datname;
+`
+	out, err := psql(c, "postgres", q)
+	if err != nil {
+		return nil, err
+	}
+	var dbs []string
+	for _, l := range strings.Split(strings.TrimSpace(out), "\n") {
+		if l = strings.TrimSpace(l); l != "" {
+			dbs = append(dbs, l)
+		}
+	}
+	return dbs, nil
+}
+
 // Tenants is Databases minus the control database.
 func Tenants(c *registry.Config, p registry.Project) ([]string, error) {
 	all, err := Databases(c, p)
@@ -191,15 +210,13 @@ func DropRole(c *registry.Config, p registry.Project) error {
 // Psql attaches an interactive shell to a database as the project's own role,
 // via pgbouncer, so what you type is subject to the same privileges the app has.
 func Psql(c *registry.Config, p registry.Project, db string) error {
-	dir, err := stack.Dir()
+	args, err := stack.ComposeArgs(
+		"exec", "-e", "PGPASSWORD="+p.Password, "-it", "postgres",
+		"psql", "-h", "pgbouncer", "-p", "6432", "-U", p.Role, "-d", db)
 	if err != nil {
 		return err
 	}
-	cmd := exec.Command("docker", "compose",
-		"--project-directory", dir,
-		"-f", dir+"/docker-compose.yml", "--env-file", dir+"/.env",
-		"exec", "-e", "PGPASSWORD="+p.Password, "-it", "postgres",
-		"psql", "-h", "pgbouncer", "-p", "6432", "-U", p.Role, "-d", db)
+	cmd := exec.Command("docker", args...)
 	cmd.Stdout, cmd.Stderr, cmd.Stdin = os.Stdout, os.Stderr, os.Stdin
 	return cmd.Run()
 }

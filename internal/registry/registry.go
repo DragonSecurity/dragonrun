@@ -35,7 +35,16 @@ type Project struct {
 	// databases at runtime. They are named <db>_<tenant> and dragonrun treats
 	// anything matching that prefix as belonging to this project.
 	Tenants bool `json:"tenants"`
+	// NoSite is a project with a role and a database but nothing to serve --
+	// a migration scratch database, a worker with no HTTP surface, a schema
+	// shared by two other repos. It gets no caddy site and no host port, so it
+	// can never collide with a real one, and Upstream stays 0.
+	NoSite bool `json:"no_site,omitempty"`
 }
+
+// Serves reports whether the project has an HTTP route. Everything that
+// renders a URL, claims a port, or writes a caddy site has to ask first.
+func (p Project) Serves() bool { return !p.NoSite }
 
 // TenantPrefix is the namespace a project owns in the shared cluster. Two
 // projects both creating a "tenant_1" would collide without it.
@@ -86,6 +95,15 @@ func (p *Ports) fill() {
 	}
 }
 
+// DefaultBind keeps the edge on loopback, which is what a dev stack wants
+// until someone explicitly asks for a phone on the same wifi to reach it.
+const DefaultBind = "127.0.0.1"
+
+// LANBound reports whether the edge is published anywhere other than loopback,
+// which is the condition every "this is now reachable from the network" warning
+// hangs off.
+func (c *Config) LANBound() bool { return c.Bind != "" && c.Bind != DefaultBind }
+
 // DNS modes. dragonrun can run its own resolver, or stand aside for one that
 // already exists on the network.
 const (
@@ -100,9 +118,19 @@ const (
 )
 
 type Config struct {
-	Domain                string `json:"domain"`
-	DNS                   string `json:"dns"`
-	Ports                 Ports  `json:"ports"`
+	Domain string `json:"domain"`
+	DNS    string `json:"dns"`
+	Ports  Ports  `json:"ports"`
+	// Bind is the host address the EDGE publishes on. Everything else in the
+	// stack -- postgres, pgbouncer, mailpit, pgweb -- stays on loopback
+	// unconditionally: those speak for themselves on the wire, and a dev
+	// machine that joins an untrusted network should not carry a superuser
+	// database console with it.
+	//
+	// The default is loopback. Widening it is a deliberate act, because caddy
+	// then serves mail.<domain> and pgweb.<domain> to anything that can reach
+	// the machine and resolve the name.
+	Bind                  string `json:"bind,omitempty"`
 	Superuser             string `json:"superuser"`
 	SuperuserPassword     string `json:"superuser_password"`
 	PgbouncerAuthPassword string `json:"pgbouncer_auth_password"`
@@ -144,7 +172,7 @@ func Load() (*Config, error) {
 	b, err := os.ReadFile(p)
 	if os.IsNotExist(err) {
 		return &Config{Domain: "test", Superuser: "dragon", DNS: DNSDnsmasq,
-			Ports: DefaultPorts(), Projects: map[string]Project{}}, nil
+			Bind: DefaultBind, Ports: DefaultPorts(), Projects: map[string]Project{}}, nil
 	}
 	if err != nil {
 		return nil, err
@@ -162,6 +190,9 @@ func Load() (*Config, error) {
 	c.Ports.fill()
 	if c.DNS == "" {
 		c.DNS = DNSDnsmasq
+	}
+	if c.Bind == "" {
+		c.Bind = DefaultBind
 	}
 	return &c, nil
 }
@@ -209,8 +240,13 @@ func (c *Config) Sorted() []Project {
 // UpstreamTaken reports whether another project already claims a host port,
 // which is the exact class of collision dragonrun exists to end.
 func (c *Config) UpstreamTaken(port int, except string) (string, bool) {
+	// Port 0 is not a port: it is what every database-only project carries, so
+	// comparing it would report each of them as colliding with all the others.
+	if port == 0 {
+		return "", false
+	}
 	for _, p := range c.Projects {
-		if p.Name != except && p.Upstream == port {
+		if p.Name != except && p.Serves() && p.Upstream == port {
 			return p.Name, true
 		}
 	}

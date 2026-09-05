@@ -96,10 +96,18 @@ This does NOT install the dragonrun binary -- use
 		if err := edge.WriteServiceSites(c); err != nil {
 			return err
 		}
+		if err := edge.WriteAllSites(c); err != nil {
+			return err
+		}
 
 		fmt.Println("\n== building and starting the stack ==")
 		if err := stack.Compose("up", "-d", "--build"); err != nil {
 			return err
+		}
+		if rotated, err := edge.EnsureCertLifetimes(); err != nil {
+			return err
+		} else if rotated {
+			fmt.Println("   rotated the local CA intermediate — certificates now last 90 days")
 		}
 
 		// A superuser bookmark for the whole cluster. pgweb's database

@@ -8,6 +8,7 @@ package dnsconf
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"runtime"
@@ -61,11 +62,71 @@ func Uninstall(domain string) error {
 	return nil
 }
 
-// Resolves checks the end-to-end path rather than the config file: dnsmasq up,
-// resolver installed, and the OS actually returning loopback for the name.
-func Resolves(host string) bool {
+// Addrs asks the OS -- not the config file -- what a name resolves to, which
+// is the only question that matters end to end: resolver reachable, wildcard
+// in place, cache not serving a stale NXDOMAIN.
+//
+// dscacheutil rather than net.LookupHost because it goes through the same
+// resolver stack (/etc/resolver included) that every other program on the Mac
+// uses, and Go's resolver does not always.
+func Addrs(host string) []string {
 	out, err := exec.Command("dscacheutil", "-q", "host", "-a", "name", host).Output()
-	return err == nil && strings.Contains(string(out), "127.0.0.1")
+	if err != nil {
+		return nil
+	}
+	var ips []string
+	for _, line := range strings.Split(string(out), "\n") {
+		for _, k := range []string{"ip_address: ", "ipv6_address: "} {
+			if v, ok := strings.CutPrefix(strings.TrimSpace(line), k); ok {
+				ips = append(ips, strings.TrimSpace(v))
+			}
+		}
+	}
+	return ips
+}
+
+// Local reports whether an address belongs to this machine.
+//
+// Loopback is the common answer, but not the only correct one: a network-wide
+// rewrite (AdGuard Home, Pi-hole, a router) usually points the domain at the
+// host's LAN address so phones and other machines resolve it too. That is a
+// working setup, and a check that insists on 127.0.0.1 calls it broken.
+func Local(ip string) bool {
+	addr := net.ParseIP(ip)
+	if addr == nil {
+		return false
+	}
+	if addr.IsLoopback() {
+		return true
+	}
+	ifaces, err := net.InterfaceAddrs()
+	if err != nil {
+		return false
+	}
+	for _, a := range ifaces {
+		if n, ok := a.(*net.IPNet); ok && n.IP.Equal(addr) {
+			return true
+		}
+	}
+	return false
+}
+
+// Loopback reports whether an address is this machine's loopback.
+func Loopback(ip string) bool {
+	addr := net.ParseIP(ip)
+	return addr != nil && addr.IsLoopback()
+}
+
+// Resolves reports whether the name resolves to an address this machine
+// answers on -- the wildcard working, by whichever route.
+func Resolves(host string) bool {
+	ips := Addrs(host)
+	for _, ip := range ips {
+		if !Local(ip) {
+			return false
+		}
+	}
+	return len(ips) > 0
 }
 
 func run(name string, args ...string) error {

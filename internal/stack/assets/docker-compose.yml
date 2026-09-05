@@ -1,7 +1,12 @@
 name: dragonrun
 
-# The single shared dev stack. Everything binds 127.0.0.1 only — this is a
-# local development edge, not something to expose on a LAN.
+# The single shared dev stack. Everything except the edge binds 127.0.0.1
+# unconditionally: a database, a bouncer, an SMTP sink and a superuser database
+# console have no business on a network.
+#
+# The edge alone is movable, via BIND_EDGE (`dragonrun bind`), because the one
+# thing people genuinely need off-loopback is a phone on the same wifi loading
+# https://app.test. It still defaults to loopback.
 #
 # Ports are deliberately the CANONICAL ones (5432, 6432, 1025, 8025, 8081).
 # The ~60 per-project compose files in these repos already bind exactly these,
@@ -77,8 +82,8 @@ services:
     container_name: dragonrun-caddy
     restart: unless-stopped
     ports:
-      - "127.0.0.1:${PORT_HTTP:-80}:80"
-      - "127.0.0.1:${PORT_HTTPS:-443}:443"
+      - "${BIND_EDGE:-127.0.0.1}:${PORT_HTTP:-80}:80"
+      - "${BIND_EDGE:-127.0.0.1}:${PORT_HTTPS:-443}:443"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:

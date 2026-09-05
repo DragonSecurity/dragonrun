@@ -97,15 +97,25 @@ func WriteEnv(c *registry.Config) error {
 		"SUPERUSER_PASSWORD=%s\n"+
 		"PGBOUNCER_AUTH_PASSWORD=%s\n"+
 		"DRAGONRUN_HOME=%s\n"+
+		"BIND_EDGE=%s\n"+
 		"PORT_POSTGRES=%d\nPORT_BOUNCER=%d\nPORT_SMTP=%d\nPORT_MAILUI=%d\n"+
 		"PORT_PGWEB=%d\nPORT_HTTP=%d\nPORT_HTTPS=%d\nPORT_DNS=%d\n",
-		c.Superuser, c.SuperuserPassword, c.PgbouncerAuthPassword, h,
+		c.Superuser, c.SuperuserPassword, c.PgbouncerAuthPassword, h, bindEdge(c),
 		c.Ports.Postgres, c.Ports.Bouncer, c.Ports.SMTP, c.Ports.MailUI,
 		c.Ports.Pgweb, c.Ports.HTTP, c.Ports.HTTPS, c.Ports.DNS)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
 	return os.WriteFile(filepath.Join(dir, ".env"), []byte(body), 0o600)
+}
+
+// bindEdge is the address compose publishes caddy on. An empty Bind is a
+// registry written before the setting existed, not a request for 0.0.0.0.
+func bindEdge(c *registry.Config) string {
+	if c.Bind == "" {
+		return registry.DefaultBind
+	}
+	return c.Bind
 }
 
 // ProjectName is the docker compose project this DRAGONRUN_HOME owns.
@@ -152,6 +162,22 @@ func composeArgs(dir string, args ...string) []string {
 var dnsProfile bool
 
 func SetDNSMode(mode string) { dnsProfile = mode == registry.DNSDnsmasq }
+
+// ComposeArgs returns the full `docker` argv for a compose subcommand.
+//
+// It exists for callers that cannot go through Compose or ComposeOut --
+// provision has to pipe a script into psql's stdin, and to hand a real
+// terminal to an interactive one -- so that the project name is still decided
+// in exactly one place. Building the argv by hand instead silently drops the
+// `-p`, and since the compose file carries `name: dragonrun`, every such call
+// lands on the DEFAULT instance's containers however DRAGONRUN_HOME is set.
+func ComposeArgs(args ...string) ([]string, error) {
+	dir, err := Dir()
+	if err != nil {
+		return nil, err
+	}
+	return composeArgs(dir, args...), nil
+}
 
 // Compose runs a docker compose subcommand with output attached to the terminal.
 func Compose(args ...string) error {
