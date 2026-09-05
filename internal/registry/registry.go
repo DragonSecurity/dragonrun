@@ -40,6 +40,9 @@ type Project struct {
 	// shared by two other repos. It gets no caddy site and no host port, so it
 	// can never collide with a real one, and Upstream stays 0.
 	NoSite bool `json:"no_site,omitempty"`
+	// extra carries members of this project's JSON object that this version
+	// has no field for. See preserve.go.
+	extra preserve
 }
 
 // Serves reports whether the project has an HTTP route. Everything that
@@ -64,6 +67,8 @@ type Ports struct {
 	HTTP     int `json:"http"`
 	HTTPS    int `json:"https"`
 	DNS      int `json:"dns"`
+
+	extra preserve
 }
 
 func DefaultPorts() Ports {
@@ -140,6 +145,8 @@ type Config struct {
 	// fresh one accumulates on every reset.
 	TrustedCAs []string           `json:"trusted_cas,omitempty"`
 	Projects   map[string]Project `json:"projects"`
+
+	extra preserve
 }
 
 // Home is ~/.dragonrun -- generated artefacts plus registry.json.
