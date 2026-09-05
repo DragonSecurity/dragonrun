@@ -40,7 +40,9 @@ func fetchLatest(ctx context.Context, module string) (latest, error) {
 	if err != nil {
 		return l, fmt.Errorf("could not reach the module proxy: %w", err)
 	}
-	defer resp.Body.Close()
+	// Closing a response body cannot fail in a way this could act on, but it
+	// is not optional either: the connection leaks without it.
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		return l, fmt.Errorf("module proxy returned %s for %s — has anything been tagged yet?",
 			resp.Status, module)
