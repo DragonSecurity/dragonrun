@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"fmt"
 	"os"
 
 	"git.dragonsecurity.io/dragonrun/internal/registry"
@@ -189,5 +190,46 @@ func TestDataPlaneDSNsDoNotDependOnDNS(t *testing.T) {
 	// BASE_URL is the exception: caddy routes on it, so it genuinely needs DNS.
 	if want := "https://automechanic.test"; v["BASE_URL"] != want {
 		t.Errorf("BASE_URL = %q, want %q", v["BASE_URL"], want)
+	}
+}
+
+// ADMIN_DATABASE_URL carries the cluster superuser and bypasses the pooler.
+// Both halves are load-bearing: the project role cannot CREATE EXTENSION or
+// terminate another role's backends, and pgbouncer's transaction pooling
+// breaks the advisory locks tenant provisioning takes -- while its own idle
+// server connections are what block the DROP the admin DSN exists to perform.
+func TestAdminURLIsSuperuserAndDirect(t *testing.T) {
+	c := &registry.Config{
+		Domain: "test", Ports: registry.DefaultPorts(),
+		Superuser: "dragon", SuperuserPassword: "supw",
+	}
+	p := registry.Project{
+		Name: "automechanic", Role: "automechanic", Password: "rolepw",
+		DB: "dragon", Host: "automechanic.test", Upstream: 8181, Tenants: true,
+	}
+	got := Vars(c, p)["ADMIN_DATABASE_URL"]
+
+	want := "postgres://dragon:supw@localhost:5432/postgres?sslmode=disable"
+	if got != want {
+		t.Errorf("ADMIN_DATABASE_URL = %q, want %q", got, want)
+	}
+	if strings.Contains(got, "rolepw") {
+		t.Error("ADMIN_DATABASE_URL carries the project role's password, not the superuser's")
+	}
+	if strings.Contains(got, fmt.Sprint(c.Ports.Bouncer)) {
+		t.Error("ADMIN_DATABASE_URL goes through pgbouncer; transaction pooling breaks admin session semantics")
+	}
+}
+
+// A project that never creates tenants has no reason to hold the superuser
+// password, so the admin DSN must not be emitted at all.
+func TestAdminURLAbsentWithoutTenants(t *testing.T) {
+	c := &registry.Config{
+		Domain: "test", Ports: registry.DefaultPorts(),
+		Superuser: "dragon", SuperuserPassword: "supw",
+	}
+	p := registry.Project{Name: "plain", Role: "plain", Password: "pw", DB: "plain", Host: "plain.test", Upstream: 8080}
+	if v, ok := Vars(c, p)["ADMIN_DATABASE_URL"]; ok {
+		t.Errorf("ADMIN_DATABASE_URL = %q for a non-tenant project; the superuser password should not leak into its .env", v)
 	}
 }

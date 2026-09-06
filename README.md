@@ -109,8 +109,8 @@ A project named `saas` owns its control database plus everything under
 `saas_`. `dragonrun env` emits two DSNs:
 
 ```sh
-DATABASE_URL=postgres://saas:…@localhost:6432/saas          # pooled
-ADMIN_DATABASE_URL=postgres://saas:…@localhost:5432/postgres # direct
+DATABASE_URL=postgres://saas:…@localhost:6432/saas             # pooled, project role
+ADMIN_DATABASE_URL=postgres://dragon:…@localhost:5432/postgres # direct, superuser
 ```
 
 Three things make runtime databases work with no configuration change:
@@ -131,6 +131,20 @@ PgBouncer holds idle server connections to a database, and those block
 
 A bare `CREATE DATABASE` *does* survive the pooler. That is measured, not
 assumed; it is not the reason for the split.
+
+Setting `auth_dbname` in PgBouncer does not change any of this. It only moves
+the pooler's `auth_query` into a fixed database instead of the one being
+connected to, which is worth doing — it stops verifier lookup depending on
+`pgbouncer_auth` being able to enter a tenant database dragonrun never saw
+created — but it buys nothing for session semantics.
+
+**Why the superuser.** The project role has `CREATEDB` and owns its tenants, so
+create and drop already work with it. It cannot `CREATE EXTENSION`, cannot
+terminate another role's backends, and is the wrong credential to hold when the
+login guard below is itself the thing that is broken. The trade is real: a
+project holding this DSN can reach every other project's data, so the guard
+protects against accident, not against a project that chooses to use its admin
+credential. Only projects registered with tenants receive it.
 
 ## Isolation
 
