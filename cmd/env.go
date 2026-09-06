@@ -25,9 +25,26 @@ import (
 // breaks advisory locks, LISTEN/NOTIFY, session GUCs and temp tables -- and
 // tenant provisioning code typically takes an advisory lock to serialise
 // migrations. Teardown is the other half: pgbouncer's own idle server
-// connections block DROP DATABASE until they are terminated.
+// connections block DROP DATABASE until they are terminated, so an admin
+// connection through the pooler is holding open what it is trying to drop.
+//
+// Setting `auth_dbname` in pgbouncer.ini does not change this. That only moves
+// the pooler's auth_query into a fixed database instead of the one being
+// connected to; it buys nothing for session semantics, which is the whole
+// reason this URL bypasses the pooler.
+//
+// It also carries the CLUSTER SUPERUSER, not the project role. The project
+// role has CREATEDB and owns its tenants, which covers create and drop -- but
+// not CREATE EXTENSION, not terminating another role's backends, and not the
+// recovery case where the login guard in template1 is what is broken. This is
+// the same trade `edge.WriteBookmark` already makes for pgweb.
+//
+// The cost is real and deliberate: a project holding this string can reach
+// every other project's data, so the cross-project login guard protects
+// against accident, not against a project that chooses to use its admin DSN.
 func Vars(c *registry.Config, p registry.Project) map[string]string {
 	auth := url.UserPassword(p.Role, p.Password).String()
+	admin := url.UserPassword(c.Superuser, c.SuperuserPassword).String()
 
 	// The data plane deliberately uses localhost, NOT a .test hostname.
 	//
@@ -41,7 +58,7 @@ func Vars(c *registry.Config, p registry.Project) map[string]string {
 	// it is what the browser asks for and what caddy routes on.
 	dbHost := "localhost"
 	pooled := fmt.Sprintf("postgres://%s@%s:%d/%s?sslmode=disable", auth, dbHost, c.Ports.Bouncer, p.DB)
-	direct := fmt.Sprintf("postgres://%s@%s:%d/postgres?sslmode=disable", auth, dbHost, c.Ports.Postgres)
+	direct := fmt.Sprintf("postgres://%s@%s:%d/postgres?sslmode=disable", admin, dbHost, c.Ports.Postgres)
 
 	// caddy serves on the configured https port; only annotate the URL when it
 	// is not the default, or every generated BASE_URL grows a pointless ":443".
