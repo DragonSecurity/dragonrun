@@ -77,6 +77,52 @@ SELECT format('CREATE DATABASE %I OWNER %I TEMPLATE template1', :'db', :'role')
 	return Harden(c, p)
 }
 
+// EnsureServiceDB creates the role and database one of dragonrun's own stack
+// services owns -- keycloak, dex, openbao.
+//
+// Deliberately the same shape as a project's: a login role, a database owned
+// by it, created from template1. That is not tidiness. The login guard lives
+// in template1 and exempts a database's OWNER, so making Keycloak own its own
+// database is what stops it reaching any project's data with the credentials
+// baked into its container -- and stops every project role reaching Keycloak's
+// user table.
+//
+// The services create their own schemas on first start, so nothing here knows
+// anything about their tables.
+func EnsureServiceDB(c *registry.Config, name, pw string) error {
+	const role = `
+SELECT format('CREATE ROLE %I LOGIN', :'role')
+ WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = :'role')
+\gexec
+SELECT format('ALTER ROLE %I LOGIN PASSWORD %L NOCREATEDB', :'role', :'pw')
+\gexec
+`
+	if _, err := psql(c, "postgres", role, "role="+name, "pw="+pw); err != nil {
+		return err
+	}
+	const create = `
+SELECT format('CREATE DATABASE %I OWNER %I TEMPLATE template1', :'db', :'role')
+ WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = :'db')
+\gexec
+`
+	if _, err := psql(c, "postgres", create, "db="+name, "role="+name); err != nil {
+		return err
+	}
+	const grants = `
+SELECT format('REVOKE CONNECT ON DATABASE %I FROM PUBLIC', :'db')
+UNION ALL
+SELECT format('GRANT CONNECT ON DATABASE %I TO %I', :'db', :'role')
+UNION ALL
+-- pgbouncer must reach the database to run auth_query against it. These
+-- services connect direct, but the pooler's wildcard route means a stray
+-- pooled connection would otherwise fail in a way nothing explains.
+SELECT format('GRANT CONNECT ON DATABASE %I TO pgbouncer_auth', :'db')
+\gexec
+`
+	_, err := psql(c, "postgres", grants, "db="+name, "role="+name)
+	return err
+}
+
 // Harden re-applies connect privileges to the control database and every
 // tenant database under the project's prefix. Tenant databases are created by
 // the application at runtime, so dragonrun only ever sees them after the fact.

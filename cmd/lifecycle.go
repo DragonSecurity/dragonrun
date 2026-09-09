@@ -10,6 +10,7 @@ import (
 	"git.dragonsecurity.io/dragonrun/internal/dnsconf"
 	"git.dragonsecurity.io/dragonrun/internal/edge"
 	"git.dragonsecurity.io/dragonrun/internal/registry"
+	"git.dragonsecurity.io/dragonrun/internal/services"
 	"git.dragonsecurity.io/dragonrun/internal/stack"
 )
 
@@ -25,25 +26,16 @@ var upCmd = &cobra.Command{
 		if err := stack.RequireDocker(); err != nil {
 			return err
 		}
-		// Re-extract so an upgraded binary never drives a stale compose file.
-		if _, err := stack.Extract(); err != nil {
+		if err := prepareStack(c); err != nil {
 			return err
 		}
-		if err := stack.WriteEnv(c); err != nil {
+		if err := startStack(c); err != nil {
 			return err
 		}
-		// Rewritten on every up so a changed domain, a new built-in service,
-		// or a change to what dragonrun generates is picked up without a
-		// separate command -- project site files included, which otherwise
-		// keep whatever `register` wrote.
-		if err := edge.WriteServiceSites(c); err != nil {
+		if action, err := services.EnsureBao(c); err != nil {
 			return err
-		}
-		if err := edge.WriteAllSites(c); err != nil {
-			return err
-		}
-		if err := stack.Compose("up", "-d", "--build"); err != nil {
-			return err
+		} else if action != "already unsealed" {
+			fmt.Println("openbao:", action)
 		}
 		// An install from before certificate lifetimes were raised is still
 		// signing 12-hour leaves off a week-long intermediate. Fix it here so

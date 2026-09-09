@@ -1,7 +1,8 @@
 # dragonrun
 
-One shared local development stack — Postgres, PgBouncer, Mailpit, pgweb, Caddy
-— and a CLI that gives every project a hostname instead of a port.
+One shared local development stack — Postgres, PgBouncer, Mailpit, pgweb,
+Keycloak, OpenBao, dex, Caddy — and a CLI that gives every project a hostname
+instead of a port.
 
 ```sh
 cd ~/projects/checkout-api
@@ -88,17 +89,69 @@ dragonrun show checkout-api   # URLs, credentials, DSNs, databases
 
 ```
              ┌── https://<project>.test ──→ your app, on the host
-Caddy :443 ──┼── https://mail.test ───────→ Mailpit
-             └── https://pgweb.test ──────→ pgweb
-
-PgBouncer :6432 ──┐
-                  ├──→ Postgres :5432   one cluster, one database per project
-Postgres  :5432 ──┘
+             ├── https://mail.test ───────→ Mailpit
+Caddy :443 ──┼── https://pgweb.test ──────→ pgweb
+             ├── https://auth.test ───────→ Keycloak ──┐
+             ├── https://bao.test ────────→ OpenBao ───┤
+             └── https://dex.test ────────→ dex ───────┤
+                                                       │
+PgBouncer :6432 ──┐                                    │
+                  ├──→ Postgres :5432 ←────────────────┘
+Postgres  :5432 ──┘    one cluster: a database per project,
+                       and one each for keycloak, dex and openbao
 ```
 
 Everything binds `127.0.0.1`. The stack is embedded in the binary and extracted
 to `$DRAGONRUN_HOME` (default `~/.dragonrun`), so there is no repository to
 clone and no compose file to keep in sync.
+
+## Identity and secrets
+
+Three services come up with the rest of the stack. `dragonrun services` prints
+every URL, credential and OIDC endpoint below.
+
+**Keycloak** at `https://auth.test`. A realm named `dragonrun` is imported on
+first start, with a `dev` / `dev` user and a public client `dragonrun` whose
+redirect URIs already cover `https://*.test/*` and any localhost port. Point an
+application at:
+
+```
+issuer   https://auth.test/realms/dragonrun
+client   dragonrun
+```
+
+The import is create-only. Once the realm exists, edit it in the admin console
+— regenerating the file changes nothing, by design, so an afternoon of clicking
+is not undone by an `up`.
+
+**OpenBao** at `https://bao.test`, `BAO_ADDR=http://localhost:8200`. Storage is
+the shared cluster, not a file volume and not dev mode, so mounts, policies and
+auth roles survive `dragonrun down`. That means a real seal, and dragonrun holds
+the single unseal key in `registry.json` and opens it on every `up`.
+
+> The unseal key exists in exactly one place. Anyone who can read
+> `registry.json` can read every secret in OpenBao — and if that file is lost,
+> the `openbao` database can never be opened again. This is a local dev stack;
+> do not model production on it.
+
+**dex** at `https://dex.test`, an OIDC provider over two connectors: a fixed
+local account (`dev@test` / `dev`) and the Keycloak realm above. Its
+`dragonrun` client is public with no redirect URIs listed, which under RFC 8252
+means any `http://localhost:<port>` callback works without registering it.
+`dragonrun-web` is confidential, and its redirect URIs are generated from the
+registry — every serving project gets `/callback`, `/auth/callback` and
+`/oauth2/callback`, refreshed on `dragonrun up`.
+
+The dex → Keycloak connector needs the edge on the default https port. Keycloak
+derives its issuer from the forwarded `Host`, and on a moved port the issuer dex
+discovers inside the Docker network differs from the one a browser sees; the
+generated config says so in place of the connector rather than producing a login
+loop.
+
+Each service owns a Postgres role and a database of the same name, created the
+same way a project's is. The login guard in `template1` exempts a database's
+owner, so Keycloak cannot reach any project's data with the credentials in its
+container, and no project role can reach Keycloak's user table.
 
 ## Multi-tenant projects
 
@@ -247,6 +300,7 @@ outlives any project. Installing the **binary** is not among them — that is
 |---|---|
 | `up` / `down` | start, stop (`down -v` also deletes data) |
 | `status` | health, DNS wiring, registered projects |
+| `services` | URLs, credentials and OIDC endpoints for Keycloak, OpenBao, dex |
 | `logs [service]` | tail |
 
 **Projects**
@@ -307,7 +361,9 @@ of truth: after `down -v`, `dragonrun sync` rebuilds every role, database and
 route from it.
 
 `registry.json` is mode `0600` and contains every project's database password in
-plain text. It lives outside any working tree for that reason.
+plain text, the Keycloak admin password, and OpenBao's unseal key and root
+token. It lives outside any working tree for that reason, and the OpenBao pair
+in particular cannot be reissued — see above.
 
 Each instance uses its own Docker Compose project name, derived from
 `$DRAGONRUN_HOME`. That is load-bearing: the compose file declares a fixed
@@ -325,6 +381,14 @@ it was given, and its `down -v` destroys real data.
   every query is dropped in silence while `netstat` shows a healthy listener.
 - Ports are overridable at `init` (`--postgres-port`, `--https-port`, …). A tool
   whose purpose is ending port collisions should not itself be the immovable one.
+- Keycloak is published on `8180`, not its canonical `8080`. `8080` is the most
+  common value of a project's own upstream port, and a tool that exists to end
+  that collision should not open with one. OpenBao (`8200`) and dex (`5556`) keep
+  their canonical ports, so a `BAO_ADDR` or issuer copied from any tutorial lands
+  here unchanged.
+- `up` starts the stack in two phases: Postgres first, then the rest. Keycloak,
+  dex and OpenBao each need a role and a database that only dragonrun can create,
+  and Compose has no way to say "run this in between".
 
 ## License
 

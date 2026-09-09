@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"git.dragonsecurity.io/dragonrun/internal/registry"
 )
 
 // The compose file declares `name: dragonrun`, so without a per-home project
@@ -37,4 +39,78 @@ func TestProjectNameIsolatesInstances(t *testing.T) {
 	if a == b {
 		t.Errorf("two different homes both gave %q — they would share volumes", a)
 	}
+}
+
+// Every variable the compose file marks required with `:?` must be written by
+// WriteEnv.
+//
+// The two drift silently and the failure is late and confusing: compose
+// refuses to interpolate, so `dragonrun up` dies with "required variable X is
+// missing a value" and nothing points at the generator that forgot it. Adding
+// a service to the compose file without adding its credential to WriteEnv is
+// exactly the mistake this catches.
+func TestWriteEnvCoversEveryRequiredComposeVariable(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("DRAGONRUN_HOME", dir)
+
+	compose, err := assets.ReadFile("assets/docker-compose.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	required := requiredVars(string(compose))
+	if len(required) == 0 {
+		t.Fatal("found no `${VAR:?...}` references — the parser is wrong, not the compose file")
+	}
+
+	c := &registry.Config{
+		Domain: "test", Superuser: "dragon", SuperuserPassword: "pw",
+		PgbouncerAuthPassword: "pw", Bind: registry.DefaultBind,
+		Ports: registry.DefaultPorts(),
+	}
+	if _, err := c.EnsureServiceSecrets(); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteEnv(c); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(filepath.Join(dir, "stack", ".env"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	written := map[string]string{}
+	for _, line := range strings.Split(string(b), "\n") {
+		if k, v, ok := strings.Cut(line, "="); ok && !strings.HasPrefix(k, "#") {
+			written[k] = v
+		}
+	}
+	for _, name := range required {
+		v, ok := written[name]
+		if !ok {
+			t.Errorf("compose requires %s but WriteEnv does not write it", name)
+			continue
+		}
+		// An empty value interpolates fine and then fails inside the
+		// container, which is the worse of the two failures.
+		if v == "" {
+			t.Errorf("WriteEnv writes %s as empty", name)
+		}
+	}
+}
+
+// requiredVars finds every ${NAME:?...} in the compose file.
+func requiredVars(s string) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, part := range strings.Split(s, "${")[1:] {
+		name, rest, ok := strings.Cut(part, ":?")
+		if !ok || strings.ContainsAny(name, "}-:") {
+			continue // not a required reference
+		}
+		_ = rest
+		if !seen[name] {
+			seen[name] = true
+			out = append(out, name)
+		}
+	}
+	return out
 }

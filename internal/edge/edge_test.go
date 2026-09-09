@@ -46,7 +46,7 @@ func TestGeneratedSitesCarryCertLifetime(t *testing.T) {
 	if err := WriteSite(p); err != nil {
 		t.Fatal(err)
 	}
-	if err := WriteServiceSites(&registry.Config{Domain: "test"}); err != nil {
+	if _, err := WriteServiceSites(&registry.Config{Domain: "test"}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -111,4 +111,37 @@ func testCert(t *testing.T, d time.Duration) []byte {
 		t.Fatal(err)
 	}
 	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+}
+
+// A project registered before a built-in service existed already holds that
+// hostname. Emitting both blocks makes caddy reject its whole config, which
+// takes down every site rather than the one in dispute -- so the built-in one
+// is dropped and reported instead.
+func TestServiceSiteYieldsToAProjectHoldingItsHostname(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("DRAGONRUN_HOME", dir)
+
+	c := &registry.Config{Domain: "test", Projects: map[string]registry.Project{
+		"auth": {Name: "auth", Host: "auth.test", Upstream: 3000},
+	}}
+	skipped, err := WriteServiceSites(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(skipped) != 1 || !strings.Contains(skipped[0], "auth.test") {
+		t.Fatalf("expected auth.test to be reported as skipped, got %v", skipped)
+	}
+	b, err := os.ReadFile(filepath.Join(dir, "caddy", "sites", "_services.caddy"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(b), "auth.test {") {
+		t.Errorf("_services.caddy still claims auth.test:\n%s", b)
+	}
+	// The services that were not in dispute must still be there.
+	for _, host := range []string{"mail.test {", "bao.test {", "dex.test {"} {
+		if !strings.Contains(string(b), host) {
+			t.Errorf("_services.caddy is missing %q:\n%s", host, b)
+		}
+	}
 }

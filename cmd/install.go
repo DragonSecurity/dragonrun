@@ -4,12 +4,14 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"text/tabwriter"
 
 	"github.com/spf13/cobra"
 
 	"git.dragonsecurity.io/dragonrun/internal/dnsconf"
 	"git.dragonsecurity.io/dragonrun/internal/edge"
 	"git.dragonsecurity.io/dragonrun/internal/registry"
+	"git.dragonsecurity.io/dragonrun/internal/services"
 	"git.dragonsecurity.io/dragonrun/internal/stack"
 )
 
@@ -71,6 +73,8 @@ This does NOT install the dragonrun binary -- use
 			{"smtp-port", &c.Ports.SMTP}, {"mail-ui-port", &c.Ports.MailUI},
 			{"pgweb-port", &c.Ports.Pgweb}, {"http-port", &c.Ports.HTTP},
 			{"https-port", &c.Ports.HTTPS}, {"dns-port", &c.Ports.DNS},
+			{"keycloak-port", &c.Ports.Keycloak}, {"bao-port", &c.Ports.Bao},
+			{"dex-port", &c.Ports.Dex},
 		} {
 			if cmd.Flags().Changed(f.name) {
 				v, err := cmd.Flags().GetInt(f.name)
@@ -84,25 +88,23 @@ This does NOT install the dragonrun binary -- use
 			return err
 		}
 
-		dir, err := stack.Extract()
-		if err != nil {
+		if err := prepareStack(c); err != nil {
 			return err
 		}
-		if err := stack.WriteEnv(c); err != nil {
+		dir, err := stack.Dir()
+		if err != nil {
 			return err
 		}
 		fmt.Println("stack:", dir)
 
-		if err := edge.WriteServiceSites(c); err != nil {
-			return err
-		}
-		if err := edge.WriteAllSites(c); err != nil {
-			return err
-		}
-
 		fmt.Println("\n== building and starting the stack ==")
-		if err := stack.Compose("up", "-d", "--build"); err != nil {
+		if err := startStack(c); err != nil {
 			return err
+		}
+		if action, err := services.EnsureBao(c); err != nil {
+			return err
+		} else {
+			fmt.Println("   openbao", action)
 		}
 		if rotated, err := edge.EnsureCertLifetimes(); err != nil {
 			return err
@@ -152,15 +154,32 @@ This does NOT install the dragonrun binary -- use
 			}
 		}
 
+		fmt.Print("\ndragonrun is up.\n\n")
+		w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+		// services.URL carries the https port when the edge is not on 443,
+		// which is exactly the install these lines would otherwise send
+		// someone to a URL that cannot answer.
+		for _, l := range []struct {
+			name, url string
+			port      int
+		}{
+			{"mail", services.URL(c, "mail"), c.Ports.MailUI},
+			{"pgweb", services.URL(c, "pgweb"), c.Ports.Pgweb},
+			{"keycloak", services.URL(c, registry.KeycloakHost), c.Ports.Keycloak},
+			{"openbao", services.URL(c, registry.BaoHost), c.Ports.Bao},
+			{"dex", services.URL(c, registry.DexHost), c.Ports.Dex},
+		} {
+			row(w, "  %s\t%s\t(or http://localhost:%d)\n", l.name, l.url, l.port)
+		}
+		row(w, "  db\tlocalhost:%d pooled\t(or localhost:%d direct)\n", c.Ports.Bouncer, c.Ports.Postgres)
+		if err := w.Flush(); err != nil {
+			return err
+		}
 		fmt.Printf(`
-dragonrun is up.
+Credentials and OIDC endpoints:  dragonrun services
 
-  mail    https://mail.%[1]s      (or http://localhost:%[2]d)
-  pgweb   https://pgweb.%[1]s     (or http://localhost:%[3]d)
-  db      localhost:%[4]d pooled  /  localhost:%[5]d direct
-
-Next: cd into a project and run `+"`dragonrun adopt`"+`.
-`, c.Domain, c.Ports.MailUI, c.Ports.Pgweb, c.Ports.Bouncer, c.Ports.Postgres)
+Next: cd into a project and run ` + "`dragonrun adopt`" + `.
+`)
 		return nil
 	},
 }
@@ -261,6 +280,9 @@ func init() {
 	installCmd.Flags().Int("http-port", d.HTTP, "host port for caddy http")
 	installCmd.Flags().Int("https-port", d.HTTPS, "host port for caddy https")
 	installCmd.Flags().Int("dns-port", d.DNS, "host port for dnsmasq")
+	installCmd.Flags().Int("keycloak-port", d.Keycloak, "host port for keycloak")
+	installCmd.Flags().Int("bao-port", d.Bao, "host port for openbao")
+	installCmd.Flags().Int("dex-port", d.Dex, "host port for dex")
 	installCmd.Flags().String("dns", registry.DNSDnsmasq,
 		"dnsmasq (run our own resolver) or external (AdGuard/Pi-hole already answers *.test)")
 	installCmd.Flags().BoolVar(&noDNS, "no-dns", false, "skip writing /etc/resolver")

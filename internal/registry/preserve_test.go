@@ -160,3 +160,66 @@ func TestLoadSavePreservesUnknownFields(t *testing.T) {
 		t.Errorf("Save() dropped future_setting — this is the bug:\n%s", b)
 	}
 }
+
+// The services block is the newest struct in the file and the only one holding
+// a credential that cannot be reissued. An older binary reading a registry
+// written by this one must not drop a field it has no name for -- losing the
+// OpenBao unseal key that way makes the openbao database permanently
+// unreadable, with nothing reporting it.
+func TestUnknownServiceFieldSurvives(t *testing.T) {
+	const src = `{
+	  "domain": "test",
+	  "superuser": "dragon",
+	  "superuser_password": "s3cret",
+	  "services": {
+	    "bao_unseal_key": "key",
+	    "bao_root_token": "token",
+	    "future_service_secret": "keep me"
+	  },
+	  "projects": {}
+	}`
+	got := roundTrip(t, src)
+	var svc map[string]json.RawMessage
+	if err := json.Unmarshal(got["services"], &svc); err != nil {
+		t.Fatal(err)
+	}
+	if string(svc["future_service_secret"]) != `"keep me"` {
+		t.Errorf("future_service_secret = %s — an older binary would have deleted it",
+			svc["future_service_secret"])
+	}
+	if string(svc["bao_unseal_key"]) != `"key"` {
+		t.Errorf("bao_unseal_key = %s", svc["bao_unseal_key"])
+	}
+}
+
+// Generating a service secret twice would leave the running container
+// authenticating with the old one, and for OpenBao would replace the only key
+// that can open its storage.
+func TestEnsureServiceSecretsNeverRegenerates(t *testing.T) {
+	c := &Config{}
+	changed, err := c.EnsureServiceSecrets()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !changed {
+		t.Fatal("first call reported no change")
+	}
+	before, err := json.Marshal(c.Services)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changed, err = c.EnsureServiceSecrets()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changed {
+		t.Error("second call reported a change")
+	}
+	after, err := json.Marshal(c.Services)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(before) {
+		t.Errorf("secrets were regenerated:\n%s\n%s", before, after)
+	}
+}

@@ -100,6 +100,13 @@ jobs:
           SUPERUSER: ci
           SUPERUSER_PASSWORD: ci
           PGBOUNCER_AUTH_PASSWORD: ci
+          # Every credential the compose file marks required with `:?`. They
+          # are listed one by one rather than defaulted in the compose file:
+          # a stack that silently starts keycloak on a blank password because
+          # WriteEnv skipped a key is worse than one that refuses to start.
+          KEYCLOAK_ADMIN_PASSWORD: ci
+          KEYCLOAK_DB_PASSWORD: ci
+          BAO_DB_PASSWORD: ci
           DRAGONRUN_HOME: /tmp/dragonrun-ci
         run: |
           docker compose \

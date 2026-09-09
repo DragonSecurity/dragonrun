@@ -91,6 +91,118 @@ services:
       - ${DRAGONRUN_HOME}/caddy/sites:/etc/caddy/sites:ro
       - caddy_data:/data
       - caddy_config:/config
+    # The edge answers to its own hostnames from INSIDE the network too.
+    #
+    # dex has to reach Keycloak at the same issuer a browser will be redirected
+    # to, or the `iss` claim it validates will not match the one it configured.
+    # Pointing it at http://keycloak:8080 would give a working back channel and
+    # an authorize redirect the browser cannot follow. An alias on caddy makes
+    # auth.<domain> resolve on both sides of the boundary and there is only one
+    # issuer in play.
+    networks:
+      default:
+        aliases:
+          - "auth.${DOMAIN:-test}"
+          - "dex.${DOMAIN:-test}"
+
+  # Keycloak, the realm-and-clients IdP, on the shared cluster.
+  #
+  # start-dev, not start: it skips the production preflight (a hostname, a real
+  # certificate, an explicit cache config) that a loopback dev stack has no
+  # answer for. The database is still postgres and still persists -- start-dev
+  # changes the checks, not the storage.
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.7.3@sha256:ff4257d0d64efbe99ed1ddfaf07765cc3c36dc7518bf8324d41961327f441c54
+    container_name: dragonrun-keycloak
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: ["start-dev", "--import-realm"]
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${SUPERUSER:-dragon}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:?set in stack/.env}
+      KC_DB: postgres
+      # Direct to postgres, not through pgbouncer: Keycloak holds its own
+      # connection pool and leans on session state that transaction pooling
+      # discards.
+      KC_DB_URL: jdbc:postgresql://postgres:5432/keycloak
+      KC_DB_USERNAME: keycloak
+      KC_DB_PASSWORD: ${KEYCLOAK_DB_PASSWORD:?set in stack/.env}
+      # No KC_HOSTNAME. Caddy sets X-Forwarded-Host/Proto, so Keycloak derives
+      # its issuer from whatever was asked for -- which is what keeps BOTH
+      # https://auth.<domain> and the localhost fallback port working. Pinning
+      # a hostname would make the fallback redirect away from itself.
+      KC_PROXY_HEADERS: xforwarded
+      KC_HTTP_ENABLED: "true"
+      KC_HEALTH_ENABLED: "true"
+    volumes:
+      - ${DRAGONRUN_HOME}/keycloak/import:/opt/keycloak/data/import:ro
+    ports:
+      - "127.0.0.1:${PORT_KEYCLOAK:-8180}:8080"
+    healthcheck:
+      # The image is UBI-micro: no curl, no wget. This is bash's /dev/tcp
+      # against the management port, which is where KC_HEALTH_ENABLED puts the
+      # health endpoints. dex depends on it, so "the port is open" is not
+      # enough -- the realm has to be imported before dex does discovery.
+      test:
+        - CMD-SHELL
+        - >-
+          exec 3<>/dev/tcp/127.0.0.1/9000 &&
+          printf 'GET /health/ready HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n' >&3 &&
+          grep -q '"status": "UP"' <&3
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+
+  # OpenBao, sealed, storing its encrypted blobs in the shared cluster.
+  #
+  # NOT -dev mode: dev mode is in-memory, so every `dragonrun down` would take
+  # the mounts, policies and JWT auth roles with it, and the one thing worth
+  # modelling locally -- a GitHub Actions OIDC role you configure once -- is
+  # exactly what would not survive. The cost is a seal, which `dragonrun up`
+  # opens with the key it holds in registry.json.
+  openbao:
+    image: openbao/openbao:2.6.2@sha256:11fd73a2102cda9c55d5d881a8c3210303146a7ec1e8ac76f526e175c6d24641
+    container_name: dragonrun-openbao
+    restart: unless-stopped
+    # OpenBao locks its memory so secrets cannot be paged to disk. Without this
+    # capability the mlock fails and the process exits; disable_mlock in the
+    # config is the other half, for hosts that will not grant it.
+    cap_add:
+      - IPC_LOCK
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: ["server", "-config=/openbao/config/openbao.hcl"]
+    environment:
+      # Direct to postgres. The pooler would be actively wrong here: OpenBao's
+      # HA lock is a session-scoped thing, and transaction pooling discards
+      # exactly that.
+      BAO_PG_CONNECTION_URL: postgres://openbao:${BAO_DB_PASSWORD:?set in stack/.env}@postgres:5432/openbao?sslmode=disable
+    volumes:
+      - ./openbao/openbao.hcl:/openbao/config/openbao.hcl:ro
+    ports:
+      - "127.0.0.1:${PORT_BAO:-8200}:8200"
+
+  # dex, a small OIDC provider in front of both a throwaway local account and
+  # the Keycloak realm. Its config is GENERATED into DRAGONRUN_HOME rather than
+  # embedded: it carries the domain and three generated secrets.
+  dex:
+    image: dexidp/dex:v2.45.1-alpine@sha256:8499afd690c437f52301efd2b05b2455da5bd2dfc20332cd697dc9937f808462
+    container_name: dragonrun-dex
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+    command: ["dex", "serve", "/etc/dex/config.yaml"]
+    volumes:
+      - ${DRAGONRUN_HOME}/dex/config.yaml:/etc/dex/config.yaml:ro
+    ports:
+      - "127.0.0.1:${PORT_DEX:-5556}:5556"
 
   # Wildcard *.test -> 127.0.0.1. Published high so it never needs a
   # privileged bind; /etc/resolver/test carries a matching `port` line.
