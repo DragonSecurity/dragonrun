@@ -67,6 +67,14 @@ type Ports struct {
 	HTTP     int `json:"http"`
 	HTTPS    int `json:"https"`
 	DNS      int `json:"dns"`
+	// The identity and secrets services are reached by hostname through
+	// caddy, so these host ports are only a fallback for a tool that cannot
+	// be pointed at a URL. Keycloak's canonical 8080 is deliberately NOT
+	// used: it is the single most common value of a project's own Upstream,
+	// and dragonrun exists to stop that collision, not to create one.
+	Keycloak int `json:"keycloak"`
+	Bao      int `json:"bao"`
+	Dex      int `json:"dex"`
 
 	extra preserve
 }
@@ -79,6 +87,10 @@ func DefaultPorts() Ports {
 		// High by design: /etc/resolver carries a `port` line, so dnsmasq
 		// never needs a privileged bind or a fight with anything on 53.
 		DNS: 15353,
+		// 8200 and 5556 are canonical for OpenBao and dex, so BAO_ADDR and a
+		// dex issuer copied from any tutorial land here. 8180 is not
+		// canonical for Keycloak, on purpose -- see the field comment.
+		Keycloak: 8180, Bao: 8200, Dex: 5556,
 	}
 }
 
@@ -93,6 +105,7 @@ func (p *Ports) fill() {
 		{&p.Postgres, d.Postgres}, {&p.Bouncer, d.Bouncer},
 		{&p.SMTP, d.SMTP}, {&p.MailUI, d.MailUI}, {&p.Pgweb, d.Pgweb},
 		{&p.HTTP, d.HTTP}, {&p.HTTPS, d.HTTPS}, {&p.DNS, d.DNS},
+		{&p.Keycloak, d.Keycloak}, {&p.Bao, d.Bao}, {&p.Dex, d.Dex},
 	} {
 		if *f.v == 0 {
 			*f.v = f.def
@@ -143,8 +156,11 @@ type Config struct {
 	// in the system keychain. Recreating the caddy volume mints a brand new CA,
 	// so without this the old one lingers as trusted-but-useless clutter and a
 	// fresh one accumulates on every reset.
-	TrustedCAs []string           `json:"trusted_cas,omitempty"`
-	Projects   map[string]Project `json:"projects"`
+	TrustedCAs []string `json:"trusted_cas,omitempty"`
+	// Services carries the credentials for keycloak, openbao and dex. See
+	// services.go -- the OpenBao pair in particular is unrecoverable.
+	Services Services           `json:"services,omitempty"`
+	Projects map[string]Project `json:"projects"`
 
 	extra preserve
 }
@@ -265,6 +281,12 @@ func (c *Config) UpstreamTaken(port int, except string) (string, bool) {
 // database would silently interleave their schemas and migrations, and the
 // second `register` would look like it succeeded.
 func (c *Config) DBTaken(db, except string) (string, bool) {
+	// The built-in services own databases the registry has no project for, so
+	// they have to be checked separately or `register x --db keycloak` would
+	// be handed Keycloak's own storage.
+	if ServiceDBs[db] {
+		return "dragonrun's built-in services", true
+	}
 	for _, p := range c.Projects {
 		if p.Name == except {
 			continue
@@ -281,7 +303,15 @@ func (c *Config) DBTaken(db, except string) (string, bool) {
 // Reserved names are the built-in service hostnames. A project called "mail"
 // would produce a second `mail.test` site block and caddy refuses duplicate
 // addresses, taking the whole edge down rather than just that project.
-var Reserved = map[string]bool{"mail": true, "pgweb": true, "db": true}
+//
+// keycloak and openbao are reserved alongside the hostnames they are served
+// under: they are postgres role and database names in the shared cluster, and
+// a project claiming either would be handed a role that already exists.
+var Reserved = map[string]bool{
+	"mail": true, "pgweb": true, "db": true,
+	KeycloakHost: true, BaoHost: true, DexHost: true,
+	KeycloakDB: true, "openbao": true,
+}
 
 // RecordCA remembers a fingerprint dragonrun trusted, and reports which
 // previously-trusted ones are now superseded.

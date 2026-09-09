@@ -1,9 +1,9 @@
 // Package cmd holds the dragonrun CLI.
 //
 // dragonrun runs ONE shared dev stack -- postgres, pgbouncer, mailpit, pgweb,
-// caddy, dnsmasq -- and hands each project a generated environment pointing at
-// it. Applications keep running on the host under mprocs; dragonrun never
-// supervises them.
+// keycloak, openbao, dex, caddy, dnsmasq -- and hands each project a generated
+// environment pointing at it. Applications keep running on the host under
+// mprocs; dragonrun never supervises them.
 package cmd
 
 import (
@@ -26,6 +26,9 @@ shared one, and gives each project a hostname instead of a port.
   pgbouncer  wildcard routing, so runtime-created tenant databases just work
   mailpit    one inbox on the canonical 1025/8025
   pgweb      one UI, superuser, switch databases from the browser
+  keycloak   an OIDC realm at https://auth.test, users and clients ready
+  openbao    sealed secret storage at https://bao.test, opened on start
+  dex        a small OIDC provider at https://dex.test, over both of the above
   caddy      https://<project>.test -> the app on your host
   dnsmasq    *.test -> 127.0.0.1, no per-project DNS work
 

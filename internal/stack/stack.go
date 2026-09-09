@@ -72,7 +72,7 @@ func Extract() (string, error) {
 	}
 
 	h, _ := registry.Home()
-	for _, sub := range []string{"caddy/sites", "pgweb/bookmarks"} {
+	for _, sub := range []string{"caddy/sites", "pgweb/bookmarks", "dex", "keycloak/import"} {
 		if err := os.MkdirAll(filepath.Join(h, sub), 0o755); err != nil {
 			return "", err
 		}
@@ -97,12 +97,19 @@ func WriteEnv(c *registry.Config) error {
 		"SUPERUSER_PASSWORD=%s\n"+
 		"PGBOUNCER_AUTH_PASSWORD=%s\n"+
 		"DRAGONRUN_HOME=%s\n"+
+		"DOMAIN=%s\n"+
 		"BIND_EDGE=%s\n"+
+		"KEYCLOAK_ADMIN_PASSWORD=%s\n"+
+		"KEYCLOAK_DB_PASSWORD=%s\n"+
+		"BAO_DB_PASSWORD=%s\n"+
 		"PORT_POSTGRES=%d\nPORT_BOUNCER=%d\nPORT_SMTP=%d\nPORT_MAILUI=%d\n"+
-		"PORT_PGWEB=%d\nPORT_HTTP=%d\nPORT_HTTPS=%d\nPORT_DNS=%d\n",
-		c.Superuser, c.SuperuserPassword, c.PgbouncerAuthPassword, h, bindEdge(c),
+		"PORT_PGWEB=%d\nPORT_HTTP=%d\nPORT_HTTPS=%d\nPORT_DNS=%d\n"+
+		"PORT_KEYCLOAK=%d\nPORT_BAO=%d\nPORT_DEX=%d\n",
+		c.Superuser, c.SuperuserPassword, c.PgbouncerAuthPassword, h, c.Domain, bindEdge(c),
+		c.Services.KeycloakAdminPassword, c.Services.KeycloakDBPassword, c.Services.BaoDBPassword,
 		c.Ports.Postgres, c.Ports.Bouncer, c.Ports.SMTP, c.Ports.MailUI,
-		c.Ports.Pgweb, c.Ports.HTTP, c.Ports.HTTPS, c.Ports.DNS)
+		c.Ports.Pgweb, c.Ports.HTTP, c.Ports.HTTPS, c.Ports.DNS,
+		c.Ports.Keycloak, c.Ports.Bao, c.Ports.Dex)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}

@@ -143,7 +143,7 @@ with a project that does serve.`,
 			return err
 		}
 		// Keeps the built-in sites present even if DRAGONRUN_HOME was wiped.
-		if err := edge.WriteServiceSites(c); err != nil {
+		if err := writeServiceSites(c); err != nil {
 			return err
 		}
 

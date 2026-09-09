@@ -30,6 +30,12 @@ func findOrphans(c *registry.Config) ([]orphan, error) {
 	// owned answers "does any project account for this database", including
 	// the tenant namespace each project owns at runtime.
 	ownedDB := func(db string) bool {
+		// keycloak, dex and openbao own databases the registry has no project
+		// for. Without this every `dragonrun status` would report the stack's
+		// own storage as something nobody remembers creating.
+		if registry.ServiceDBs[db] {
+			return true
+		}
 		for _, p := range c.Projects {
 			if db == p.DB || (p.Tenants && strings.HasPrefix(db, p.TenantPrefix())) {
 				return true
