@@ -190,7 +190,7 @@ services:
   # the Keycloak realm. Its config is GENERATED into DRAGONRUN_HOME rather than
   # embedded: it carries the domain and three generated secrets.
   dex:
-    image: dexidp/dex:v2.45.1-alpine@sha256:8499afd690c437f52301efd2b05b2455da5bd2dfc20332cd697dc9937f808462
+    image: dexidp/dex:v2.46.0-alpine@sha256:933fcd3f523338c847b88ef84a7145fb2fcb7b9917f08418612afeaaa2001777
     container_name: dragonrun-dex
     restart: unless-stopped
     depends_on:
