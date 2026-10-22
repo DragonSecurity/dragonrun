@@ -1,4 +1,4 @@
-FROM alpine:3.24@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
+FROM alpine:3.24@sha256:c6b073f8e9e58d881f6ffba6ebf3b9ebd60b9e7d6e8337018c0e68bb5c356873
 
 # The apk package creates the `pgbouncer` user itself; adduser is guarded so
 # the build does not break if a future package version stops doing that.
