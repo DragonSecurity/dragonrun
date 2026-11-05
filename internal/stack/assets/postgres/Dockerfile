@@ -1,4 +1,4 @@
-FROM postgres:18@sha256:3a4264520e121176619f54ff867d12774bc81e95e7b84db58d63bccdb6144b81
+FROM postgres:18@sha256:bd5dfa494a5a259704365813dbfa5fa6b3e69be7348d43b547f540c730478583
 
 # Same SSL-bootstrapping entrypoint the per-project stacks already use, so the
 # shared cluster behaves identically to what these repos were talking to.
