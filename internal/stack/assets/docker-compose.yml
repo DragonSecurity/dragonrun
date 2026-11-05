@@ -78,7 +78,7 @@ services:
       - "127.0.0.1:${PORT_PGWEB:-8081}:8081"
 
   caddy:
-    image: caddy:2-alpine@sha256:70b3180738b46cd88e49b300d790ae448a0aca3f58edef0f000bb57d619a9ab3
+    image: caddy:2-alpine@sha256:f6228111e5fafa1a5238258d0858e103f10599b8d1659a146e7726681a002bb9
     container_name: dragonrun-caddy
     restart: unless-stopped
     ports:
