@@ -34,17 +34,7 @@ jobs:
         run: go test ./... -race
 
       - name: embedded stack assets
-        env:
-          SUPERUSER: ci
-          SUPERUSER_PASSWORD: ci
-          PGBOUNCER_AUTH_PASSWORD: ci
-          DRAGONRUN_HOME: /tmp/dragonrun-ci
-        run: |
-          docker compose \
-            -f internal/stack/assets/docker-compose.yml \
-            --profile dnsmasq \
-            config -q
-          shellcheck --severity=warning $(find internal/stack/assets -name '*.sh')
+        run: ./.github/scripts/check-stack-assets.sh
 
   goreleaser:
     name: goreleaser
